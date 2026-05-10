@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import FileUploader from '@/components/public/FileUploader.vue'
-import { ref } from 'vue'
-import { Upload } from 'lucide-vue-next'
+import { ref, watch } from 'vue'
+import { Upload, Image } from 'lucide-vue-next'
 import { Input } from '@/components/ui/input'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
 
 const password = ref('')
 const quality = ref(0.7)
@@ -16,7 +19,27 @@ const uploadInfo = ref<{
   thumbnailUrl?: string
   urlOriginal?: string
   thumbnailOriginalUrl?: string
+  name: string
+  size: number
+  type: string
+  compressionRatio: number
+  width: number
+  height: number
+  hasThumbnail: boolean
+  thumbnailWidth: number
+  thumbnailHeight: number
+  thumbnailSize: number
 } | null>(null)
+
+watch(uploadInfo, (val) => {
+  if (val) {
+    fetch('/kv-img', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(val),
+    }).catch(() => {})
+  }
+})
 </script>
 
 <template>
@@ -29,6 +52,14 @@ const uploadInfo = ref<{
         </div>
         <p class="text-sm text-muted-foreground">拖拽上传 · 压缩转码 · 直达链接</p>
       </div>
+
+      <button
+        class="mb-6 inline-flex items-center gap-1.5 rounded-lg border border-border/50 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-border hover:text-foreground"
+        @click="router.push('/gallery')"
+      >
+        <Image class="h-3.5 w-3.5" />
+        图库
+      </button>
 
       <div class="w-full max-w-md space-y-5">
         <div class="space-y-4 rounded-xl border border-border/50 bg-card px-5 py-4">

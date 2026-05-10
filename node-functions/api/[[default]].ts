@@ -216,4 +216,11 @@ function extractImagePath(rawPath: string): string {
   return path
 }
 
+export async function onRequest(context: { request: Request; env: Record<string, unknown> }) {
+  const g = globalThis as Record<string, unknown>
+  if (context.env) g['env'] = context.env
+  if (context.env && context.env['KV']) g['KV'] = context.env['KV']
+  return app.handle(context.request)
+}
+
 export default app

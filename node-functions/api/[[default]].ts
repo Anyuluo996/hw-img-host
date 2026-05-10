@@ -24,7 +24,7 @@ interface KvStore {
 
 function getKV(): KvStore | null {
   const g = globalThis as Record<string, unknown>
-  return (g['KV'] as KvStore | undefined) || null
+  return g.KV || g.env?.KV || null
 }
 
 async function getRecords() {
@@ -218,8 +218,12 @@ function extractImagePath(rawPath: string): string {
 
 export async function onRequest(context: { request: Request; env: Record<string, unknown> }) {
   const g = globalThis as Record<string, unknown>
-  if (context.env) g['env'] = context.env
-  if (context.env && context.env['KV']) g['KV'] = context.env['KV']
+  if (context.env) {
+    g.env = context.env
+  }
+  if (context.env?.KV) {
+    g.KV = context.env.KV
+  }
   return app.handle(context.request)
 }
 

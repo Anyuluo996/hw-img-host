@@ -11,11 +11,6 @@ const upload = multer({
 })
 const app = express()
 
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`)
-  next()
-})
-
 app.get('/upload/sign', async (req, res) => {
   try {
     const fileName = req.query.name as string
@@ -100,15 +95,7 @@ app.post(
       )
     } catch (err: unknown) {
       const msg = (err as Error).message || '未知错误'
-      let detail = ''
-      const responseData = (err as { response?: { data?: unknown } }).response?.data
-      if (responseData && typeof responseData === 'string') {
-        detail = responseData
-      } else if (responseData && Buffer.isBuffer(responseData)) {
-        detail = responseData.toString('utf8')
-      } else if (responseData instanceof ArrayBuffer) {
-        detail = Buffer.from(responseData).toString('utf8')
-      }
+      const detail = getErrorDetail(err)
       console.error('上传失败:', msg, detail)
       res.status(500).json(
         reply(1, '上传失败', {
@@ -120,18 +107,27 @@ app.post(
   },
 )
 
-/**
- * 从 URL 中提取图片路径
- * @param {string} url - 完整的 URL
- * @returns {string} - 提取的图片路径
- */
-function extractImagePath(url: string): string {
-  if (url.includes('-/imgs/')) {
-    return url.split('-/imgs/')[1]
-  } else if (url.includes('-/files/')) {
-    return url.split('-/files/')[1]
-  }
-  return url
+function getErrorDetail(err: unknown): string | undefined {
+  const responseData = (err as { response?: { data?: unknown } }).response?.data
+  if (!responseData) return undefined
+  if (typeof responseData === 'string') return responseData
+  if (Buffer.isBuffer(responseData)) return responseData.toString('utf8')
+  if (responseData instanceof ArrayBuffer) return Buffer.from(responseData).toString('utf8')
+  return undefined
+}
+
+function extractImagePath(rawPath: string): string {
+  let path = rawPath
+  const queryIdx = path.indexOf('?')
+  if (queryIdx !== -1) path = path.substring(0, queryIdx)
+  const hashIdx = path.indexOf('#')
+  if (hashIdx !== -1) path = path.substring(0, hashIdx)
+
+  const imgsIdx = path.indexOf('-/imgs/')
+  if (imgsIdx !== -1) return path.substring(imgsIdx + 7)
+  const filesIdx = path.indexOf('-/files/')
+  if (filesIdx !== -1) return path.substring(filesIdx + 8)
+  return path
 }
 
 export default app

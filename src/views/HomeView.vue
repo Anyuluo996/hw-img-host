@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label'
 
 const password = ref('')
 const quality = ref(0.7)
-const generateThumbnail = ref(true)
+const generateThumbnail = ref(false)
 
 const uploadInfo = ref<{
   url: string

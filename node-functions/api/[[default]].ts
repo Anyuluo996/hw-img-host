@@ -1,52 +1,39 @@
 import express from 'express'
+import multer from 'multer'
 import { uploadToCnb, signUpload } from './_utils'
 import { reply } from './_reply'
-import multer from 'multer'
 
-const upload = multer({
-  limits: {
-    fileSize: 20 * 1024 * 1024, // 单文件最大 20MB
-    fieldSize: 20 * 1024 * 1024, // 表单字段最大 20MB
-  },
-})
-
-declare let img_kv: {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  get(key: string, type?: 'text' | 'json' | 'arrayBuffer' | 'stream'): Promise<any>
+interface KvStore {
+  get(key: string, type?: 'text' | 'json' | 'arrayBuffer' | 'stream'): Promise<unknown>
   put(key: string, value: string | ArrayBuffer | ArrayBufferView | ReadableStream): Promise<void>
   delete(key: string): Promise<void>
-  list(options?: { prefix?: string; limit?: number; cursor?: string }): Promise<{
-    complete: boolean
-    cursor: string
-    keys: Array<{ name: string }>
-  }>
 }
+
+declare let img_kv: KvStore | undefined
 
 const app = express()
 app.use(express.json())
 
-// ── KV helpers ──
+const upload = multer({
+  limits: {
+    fileSize: 20 * 1024 * 1024,
+    fieldSize: 20 * 1024 * 1024,
+  },
+})
+
 const RECORDS_KEY = 'img_kv'
 const MAX_RECORDS = 500
 
-interface KvStore {
-  get(key: string, type?: string): Promise<unknown>
-  put(key: string, value: unknown): Promise<void>
-  delete(key: string): Promise<void>
-}
-
-function getKV(): KvStore | null {
+function getKV(): KvStore {
+  if (typeof img_kv === 'undefined') {
+    throw new Error('KV Storage 未配置，请在 EdgeOne Pages 控制台启用并绑定 KV 命名空间')
+  }
   return img_kv
 }
 
-async function getRecords() {
-  const kv = getKV()
-  if (!kv) {
-    console.warn('KV not available')
-    return []
-  }
+async function getRecords(): Promise<Record<string, unknown>[]> {
   try {
-    const data = await kv.get(RECORDS_KEY, 'json')
+    const data = await getKV().get(RECORDS_KEY, 'json')
     return Array.isArray(data) ? data : []
   } catch (e) {
     console.error('KV getRecords error:', (e as Error).message)
@@ -56,7 +43,6 @@ async function getRecords() {
 
 async function addRecord(record: Record<string, unknown>) {
   const kv = getKV()
-  if (!kv) throw new Error('KV 存储未绑定，请在 EdgeOne 控制台中绑定 KV 存储')
   const records = await getRecords()
   const newRecord = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
@@ -70,13 +56,9 @@ async function addRecord(record: Record<string, unknown>) {
 }
 
 async function removeRecord(id: string) {
-  const kv = getKV()
-  if (!kv) return
   const records = await getRecords()
-  await kv.put(RECORDS_KEY, JSON.stringify(records.filter((r: { id: string }) => r.id !== id)))
+  await getKV().put(RECORDS_KEY, JSON.stringify(records.filter((r: { id: string }) => r.id !== id)))
 }
-
-// ── Upload routes ──
 
 app.get('/upload/sign', async (req, res) => {
   try {
@@ -110,7 +92,7 @@ app.post(
     ])(req, res, (err) => {
       if (err) {
         const status = err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_FIELD_SIZE' ? 413 : 400
-        return res.status(status).json(reply(1, `文件超出限制: ${err.message}`, ''))
+        return res.status(status).json(reply(1, `文件超出限制: ${err.message}`))
       }
       next()
     })
@@ -118,45 +100,35 @@ app.post(
   async (req, res) => {
     try {
       const files = req.files as { [fieldname: string]: Express.Multer.File[] }
-      if (!files || !files.file) {
-        return res.status(400).json(reply(1, '未上传文件', ''))
+      if (!files?.file) {
+        return res.status(400).json(reply(1, '未上传文件'))
       }
 
-      const mainFile = files.file?.[0]
+      const mainFile = files.file[0]
       const thumbnailFile = files.thumbnail?.[0]
+      const baseUrl = process.env.BASE_IMG_URL!
 
-      // 上传主图
       const mainResult = await uploadToCnb({
         fileBuffer: mainFile.buffer,
         fileName: mainFile.originalname,
       })
 
-      const baseUrl = process.env.BASE_IMG_URL
-
-      const mainImgPath = extractImagePath(mainResult.url)
-      const mainUrl = baseUrl + 'img-api/' + mainImgPath
-
-      let thumbnailUrl = null
-      let thumbnailAssets = null
-
-      // 上传缩略图
+      let thumbnailResult: { assets: Record<string, unknown>; url: unknown } | null = null
       if (thumbnailFile) {
-        const thumbnailResult = await uploadToCnb({
+        thumbnailResult = await uploadToCnb({
           fileBuffer: thumbnailFile.buffer,
           fileName: thumbnailFile.originalname,
         })
-
-        const thumbnailImgPath = extractImagePath(thumbnailResult.url)
-        thumbnailUrl = baseUrl + 'img-api/' + thumbnailImgPath
-        thumbnailAssets = thumbnailResult.assets
       }
 
       res.json(
         reply(0, '上传成功', {
-          url: mainUrl,
-          thumbnailUrl: thumbnailUrl,
+          url: buildImageUrl(baseUrl, mainResult.url as string),
+          thumbnailUrl: thumbnailResult
+            ? buildImageUrl(baseUrl, thumbnailResult.url as string)
+            : null,
           assets: mainResult.assets,
-          thumbnailAssets: thumbnailAssets,
+          thumbnailAssets: thumbnailResult?.assets ?? null,
           hasThumbnail: !!thumbnailFile,
         }),
       )
@@ -164,17 +136,10 @@ app.post(
       const msg = (err as Error).message || '未知错误'
       const detail = getErrorDetail(err)
       console.error('上传失败:', msg, detail)
-      res.status(500).json(
-        reply(1, '上传失败', {
-          message: msg,
-          detail: detail || undefined,
-        }),
-      )
+      res.status(500).json(reply(1, '上传失败', { message: msg, detail }))
     }
   },
 )
-
-// ── Records routes (KV-backed gallery) ──
 
 app.get('/records', async (_req, res) => {
   try {
@@ -203,40 +168,22 @@ app.delete('/records/:id', async (req, res) => {
   }
 })
 
-// ── Helpers ──
-
 function getErrorDetail(err: unknown): string | undefined {
-  const responseData = (err as { response?: { data?: unknown } }).response?.data
-  if (!responseData) return undefined
-  if (typeof responseData === 'string') return responseData
-  if (Buffer.isBuffer(responseData)) return responseData.toString('utf8')
-  if (responseData instanceof ArrayBuffer) return Buffer.from(responseData).toString('utf8')
+  const data = (err as { response?: { data?: unknown } }).response?.data
+  if (typeof data === 'string') return data
+  if (Buffer.isBuffer(data)) return data.toString('utf8')
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
   return undefined
 }
 
 function extractImagePath(rawPath: string): string {
-  let path = rawPath
-  const queryIdx = path.indexOf('?')
-  if (queryIdx !== -1) path = path.substring(0, queryIdx)
-  const hashIdx = path.indexOf('#')
-  if (hashIdx !== -1) path = path.substring(0, hashIdx)
-
-  const imgsIdx = path.indexOf('-/imgs/')
-  if (imgsIdx !== -1) return path.substring(imgsIdx + 7)
-  const filesIdx = path.indexOf('-/files/')
-  if (filesIdx !== -1) return path.substring(filesIdx + 8)
-  return path
+  const path = String(rawPath).split(/[?#]/)[0]
+  const match = path.match(/-\/(?:imgs|files)\/(.+)/)
+  return match ? match[1] : path
 }
 
-export async function onRequest(context: { request: Request; env: Record<string, unknown> }) {
-  const g = globalThis as Record<string, unknown>
-  if (context.env) {
-    g.env = context.env
-  }
-  if (context.env?.KV) {
-    g.KV = context.env.KV
-  }
-  return app.handle(context.request)
+function buildImageUrl(baseUrl: string, rawPath: string): string {
+  return baseUrl + 'img-api/' + extractImagePath(rawPath)
 }
 
 export default app

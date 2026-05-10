@@ -8,7 +8,7 @@ import { toast } from 'vue-sonner'
 const router = useRouter()
 
 interface ImageRecord {
-  key: string
+  id: string
   url: string
   thumbnailUrl?: string
   urlOriginal?: string
@@ -31,19 +31,16 @@ interface ListResponse {
   msg: string
   data: {
     images: ImageRecord[]
-    cursor: string
-    complete: boolean
+    total: number
   }
 }
 
 const images = ref<ImageRecord[]>([])
 const loading = ref(true)
-const loadingMore = ref(false)
 const error = ref('')
-const cursor = ref('')
-const complete = ref(false)
+const total = ref(0)
 const brokenImages = ref(new Set<string>())
-const copiedKey = ref('')
+const copiedId = ref('')
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B'
@@ -62,12 +59,12 @@ function formatRatio(ratio: number): string {
   return (Math.abs(ratio) < 0.01 ? 0 : ratio).toFixed(1) + '%'
 }
 
-async function copyUrl(url: string, key: string) {
+async function copyUrl(url: string, id: string) {
   try {
     await navigator.clipboard.writeText(url)
-    copiedKey.value = key
+    copiedId.value = id
     setTimeout(() => {
-      if (copiedKey.value === key) copiedKey.value = ''
+      if (copiedId.value === id) copiedId.value = ''
     }, 2000)
   } catch {
     toast.error('复制失败')
@@ -78,39 +75,18 @@ async function fetchImages() {
   loading.value = true
   error.value = ''
   try {
-    const res = await fetch('/kv-img?limit=20')
+    const res = await fetch('/api/records')
     const json: ListResponse = await res.json()
     if (json.code !== 0) {
       error.value = json.msg || '加载失败'
       return
     }
     images.value = json.data.images
-    cursor.value = json.data.cursor
-    complete.value = json.data.complete
+    total.value = json.data.total
   } catch {
     error.value = '网络请求失败'
   } finally {
     loading.value = false
-  }
-}
-
-async function loadMore() {
-  if (loadingMore.value || complete.value) return
-  loadingMore.value = true
-  try {
-    const res = await fetch(`/kv-img?limit=20&cursor=${encodeURIComponent(cursor.value)}`)
-    const json: ListResponse = await res.json()
-    if (json.code !== 0) {
-      toast.error(json.msg || '加载失败')
-      return
-    }
-    images.value.push(...json.data.images)
-    cursor.value = json.data.cursor
-    complete.value = json.data.complete
-  } catch {
-    toast.error('加载更多失败')
-  } finally {
-    loadingMore.value = false
   }
 }
 
@@ -156,7 +132,7 @@ onMounted(() => {
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           <div
             v-for="img in images"
-            :key="img.key"
+            :key="img.id"
             class="group overflow-hidden rounded-xl border border-border/50 bg-card transition hover:border-border"
           >
             <div class="relative aspect-4/3 overflow-hidden bg-muted/30">
@@ -165,10 +141,10 @@ onMounted(() => {
                 :alt="img.name"
                 class="h-full w-full object-cover transition group-hover:scale-105"
                 loading="lazy"
-                @error="brokenImages.add(img.key)"
+                @error="brokenImages.add(img.id)"
               />
               <div
-                v-if="brokenImages.has(img.key)"
+                v-if="brokenImages.has(img.id)"
                 class="absolute inset-0 flex items-center justify-center bg-muted/30"
               >
                 <Image class="h-8 w-8 text-muted-foreground/50" :stroke-width="1" />
@@ -176,10 +152,10 @@ onMounted(() => {
               <div class="absolute inset-0 bg-black/0 transition group-hover:bg-black/20" />
               <button
                 class="absolute right-2 top-2 rounded-md bg-background/80 p-1.5 opacity-0 backdrop-blur-sm transition hover:bg-background group-hover:opacity-100"
-                :title="copiedKey === img.key ? '已复制' : '复制链接'"
-                @click="copyUrl(img.url, img.key)"
+                :title="copiedId === img.id ? '已复制' : '复制链接'"
+                @click="copyUrl(img.url, img.id)"
               >
-                <Check v-if="copiedKey === img.key" class="h-3.5 w-3.5 text-green-600" />
+                <Check v-if="copiedId === img.id" class="h-3.5 w-3.5 text-green-600" />
                 <Copy v-else class="h-3.5 w-3.5 text-foreground/70" />
               </button>
               <a
@@ -209,11 +185,7 @@ onMounted(() => {
         </div>
 
         <div class="mt-8 flex justify-center">
-          <Button v-if="!complete" variant="outline" :disabled="loadingMore" @click="loadMore">
-            <Loader2 v-if="loadingMore" class="h-4 w-4 animate-spin" />
-            {{ loadingMore ? '加载中...' : '加载更多' }}
-          </Button>
-          <p v-else class="text-xs text-muted-foreground">已加载全部图片</p>
+          <p class="text-xs text-muted-foreground">共 {{ total }} 张图片</p>
         </div>
       </template>
     </div>

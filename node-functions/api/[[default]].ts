@@ -10,6 +10,61 @@ const upload = multer({
   },
 })
 const app = express()
+app.use(express.json())
+
+// ── KV helpers ──
+const RECORDS_KEY = 'img_kv'
+const MAX_RECORDS = 500
+
+interface KvStore {
+  get(key: string, type?: string): Promise<unknown>
+  put(key: string, value: unknown): Promise<void>
+  delete(key: string): Promise<void>
+}
+
+function getKV(): KvStore | null {
+  const g = globalThis as Record<string, unknown>
+  return (g['KV'] as KvStore | undefined) || null
+}
+
+async function getRecords() {
+  const kv = getKV()
+  if (!kv) {
+    console.warn('KV not available')
+    return []
+  }
+  try {
+    const data = await kv.get(RECORDS_KEY, 'json')
+    return Array.isArray(data) ? data : []
+  } catch (e) {
+    console.error('KV getRecords error:', (e as Error).message)
+    return []
+  }
+}
+
+async function addRecord(record: Record<string, unknown>) {
+  const kv = getKV()
+  if (!kv) throw new Error('KV 存储未绑定，请在 EdgeOne 控制台中绑定 KV 存储')
+  const records = await getRecords()
+  const newRecord = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    ...record,
+    createdAt: new Date().toISOString(),
+  }
+  records.unshift(newRecord)
+  if (records.length > MAX_RECORDS) records.length = MAX_RECORDS
+  await kv.put(RECORDS_KEY, JSON.stringify(records))
+  return newRecord
+}
+
+async function removeRecord(id: string) {
+  const kv = getKV()
+  if (!kv) return
+  const records = await getRecords()
+  await kv.put(RECORDS_KEY, JSON.stringify(records.filter((r: { id: string }) => r.id !== id)))
+}
+
+// ── Upload routes ──
 
 app.get('/upload/sign', async (req, res) => {
   try {
@@ -107,6 +162,37 @@ app.post(
   },
 )
 
+// ── Records routes (KV-backed gallery) ──
+
+app.get('/records', async (_req, res) => {
+  try {
+    const records = await getRecords()
+    res.json(reply(0, 'ok', { images: records, total: records.length }))
+  } catch (e: unknown) {
+    res.status(500).json(reply(1, (e as Error).message || '获取记录失败'))
+  }
+})
+
+app.post('/records', async (req, res) => {
+  try {
+    const record = await addRecord(req.body as Record<string, unknown>)
+    res.json(reply(0, 'ok', record))
+  } catch (e: unknown) {
+    res.status(500).json(reply(1, (e as Error).message || '保存记录失败'))
+  }
+})
+
+app.delete('/records/:id', async (req, res) => {
+  try {
+    await removeRecord(req.params.id)
+    res.json(reply(0, '删除成功'))
+  } catch (e: unknown) {
+    res.status(500).json(reply(1, (e as Error).message || '删除失败'))
+  }
+})
+
+// ── Helpers ──
+
 function getErrorDetail(err: unknown): string | undefined {
   const responseData = (err as { response?: { data?: unknown } }).response?.data
   if (!responseData) return undefined
@@ -130,4 +216,11 @@ function extractImagePath(rawPath: string): string {
   return path
 }
 
-export default app
+// ── Entry: wrap Express with KV injection ──
+
+export async function onRequest(context: { request: Request; env: Record<string, unknown> }) {
+  const g = globalThis as Record<string, unknown>
+  if (context.env) g['env'] = context.env
+  if (context.env && context.env['KV']) g['KV'] = context.env['KV']
+  return app.handle(context.request)
+}

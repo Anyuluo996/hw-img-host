@@ -33,7 +33,7 @@ const uploadInfo = ref<{
 
 watch(uploadInfo, (val) => {
   if (val) {
-    fetch('/kv-img', {
+    fetch('/api/records', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(val),
@@ -44,8 +44,8 @@ watch(uploadInfo, (val) => {
 
 <template>
   <div class="min-h-screen bg-background">
-    <div class="flex min-h-screen flex-col items-center justify-center px-4 py-16">
-      <div class="mb-10 text-center">
+    <div class="flex min-h-screen flex-col items-center space-y-3 justify-center px-4 py-16">
+      <div class="text-center">
         <div class="mb-3 flex items-center justify-center gap-2.5">
           <Upload class="h-6 w-6 text-foreground/60" :stroke-width="1.5" />
           <h1 class="text-2xl font-normal tracking-wide text-foreground">图片上传</h1>
@@ -54,7 +54,7 @@ watch(uploadInfo, (val) => {
       </div>
 
       <button
-        class="mb-6 inline-flex items-center gap-1.5 rounded-lg border border-border/50 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-border hover:text-foreground"
+        class="inline-flex items-center gap-1.5 rounded-lg border border-border/50 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-border hover:text-foreground"
         @click="router.push('/gallery')"
       >
         <Image class="h-3.5 w-3.5" />

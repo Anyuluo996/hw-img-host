@@ -9,6 +9,19 @@ const upload = multer({
     fieldSize: 20 * 1024 * 1024, // 表单字段最大 20MB
   },
 })
+
+declare let img_kv: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  get(key: string, type?: 'text' | 'json' | 'arrayBuffer' | 'stream'): Promise<any>
+  put(key: string, value: string | ArrayBuffer | ArrayBufferView | ReadableStream): Promise<void>
+  delete(key: string): Promise<void>
+  list(options?: { prefix?: string; limit?: number; cursor?: string }): Promise<{
+    complete: boolean
+    cursor: string
+    keys: Array<{ name: string }>
+  }>
+}
+
 const app = express()
 app.use(express.json())
 
@@ -23,8 +36,7 @@ interface KvStore {
 }
 
 function getKV(): KvStore | null {
-  const g = globalThis as Record<string, unknown>
-  return g.KV || g.env?.KV || null
+  return img_kv
 }
 
 async function getRecords() {

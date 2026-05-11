@@ -28,7 +28,7 @@ const uploadInfo = ref<{
 
 watch(uploadInfo, (val) => {
   if (val) {
-    fetch('/api/kv', {
+    fetch('/kv-api', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

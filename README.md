@@ -2,7 +2,9 @@
 
 基于 **EdgeOne Pages Functions** + **CNB 对象存储** 的无服务器图片托管服务。支持拖拽上传、客户端 WebP 压缩、缩略图生成，并提供可调节的压缩质量和上传密码保护。
 
-![预览](./img/demo.png)
+![预览](./img/upload.png)
+![预览](./img/gallery.png)
+![预览](./img/login.png)
 
 ## 功能特性
 

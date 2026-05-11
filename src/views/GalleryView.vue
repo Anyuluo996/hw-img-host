@@ -76,7 +76,7 @@ async function fetchImages() {
   error.value = ''
   try {
     const token = localStorage.getItem('hw_img_host_token')
-    const res = await fetch('/api/kv', {
+    const res = await fetch('/kv-api', {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
     const json: ListResponse = await res.json()

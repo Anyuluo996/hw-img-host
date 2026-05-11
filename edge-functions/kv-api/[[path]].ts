@@ -143,7 +143,7 @@ export async function onRequest(context: {
     }
 
     if (method === 'POST') {
-      const body = await context.request.json() as Record<string, unknown>
+      const body = (await context.request.json()) as Record<string, unknown>
       const item = await addItem(body)
       return jsonRes({ code: 0, msg: 'ok', data: item })
     }

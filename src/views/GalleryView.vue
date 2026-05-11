@@ -75,7 +75,10 @@ async function fetchImages() {
   loading.value = true
   error.value = ''
   try {
-    const res = await fetch('/api/kv')
+    const token = localStorage.getItem('hw_img_host_token')
+    const res = await fetch('/api/kv', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
     const json: ListResponse = await res.json()
     if (json.code !== 0) {
       error.value = json.msg || '加载失败'

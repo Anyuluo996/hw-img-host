@@ -100,7 +100,6 @@ import { toast } from 'vue-sonner'
 import { XCircle, LoaderIcon } from 'lucide-vue-next'
 
 interface Props {
-  password?: string
   maxWidth?: number
   maxHeight?: number
   quality?: number
@@ -151,7 +150,6 @@ interface SignResponse {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  password: undefined,
   maxWidth: 0,
   maxHeight: 0,
   quality: 0.7,
@@ -267,7 +265,6 @@ async function compressImageToWebp(
         canvas.height = height
         ctx.drawImage(img, 0, 0, width, height)
 
-        // 根据像素数自适应质量，确保 body 不超过 3MB
         const pixelCount = width * height
         let effectiveQuality = quality
         if (pixelCount > 4_000_000) {
@@ -282,7 +279,6 @@ async function compressImageToWebp(
               reject(new Error('WebP 转换失败'))
               return
             }
-            // 如果 body 超过 3MB 且还有降质空间，再降一档
             if (blob.size > 3 * 1024 * 1024 && effectiveQuality > 0.3) {
               canvas.toBlob(
                 (retryBlob) => {
@@ -332,7 +328,6 @@ async function generateThumbnailImage(file: File): Promise<ThumbnailResult> {
           return
         }
 
-        // 计算缩略图尺寸，保持宽高比
         let width = img.width
         let height = img.height
         const maxWidth = props.thumbnailMaxWidth
@@ -354,7 +349,6 @@ async function generateThumbnailImage(file: File): Promise<ThumbnailResult> {
               const thumbnailFile = new File([blob], file.name.replace(/\.\w+$/, '_thumb.webp'), {
                 type: 'image/webp',
               })
-              // 生成预览 URL
               const previewUrl = URL.createObjectURL(blob)
               resolve({
                 thumbnailFile,
@@ -430,7 +424,6 @@ async function handleFile(f: File | null): Promise<void> {
     imageWidth.value = width
     imageHeight.value = height
 
-    // 如果需要生成缩略图
     if (props.generateThumbnail) {
       const thumbnail = await generateThumbnailImage(compressedFile)
       thumbnailFile.value = thumbnail.thumbnailFile
@@ -464,7 +457,6 @@ async function uploadFile(): Promise<void> {
       params: {
         name: file.value.name,
         size: file.value.size,
-        ...(props.password ? { password: props.password } : {}),
       },
     })
     if (signRes.data.code !== 0) {
@@ -498,7 +490,6 @@ async function uploadFile(): Promise<void> {
         params: {
           name: thumbnailFile.value.name,
           size: thumbnailFile.value.size,
-          ...(props.password ? { password: props.password } : {}),
         },
       })
       if (thumbSignRes.data.code !== 0) {

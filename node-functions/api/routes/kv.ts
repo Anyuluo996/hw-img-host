@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { reply } from '../_reply'
+import { authMiddleware } from '../_auth'
 
 interface KvStore {
   get(key: string, type?: 'text' | 'json' | 'arrayBuffer' | 'stream'): Promise<unknown>
@@ -50,7 +51,7 @@ async function removeItem(id: string) {
   await getKV().put(KV_KEY, JSON.stringify(items.filter((r) => (r as { id?: string }).id !== id)))
 }
 
-router.get('/', async (_req, res) => {
+router.get('/', authMiddleware, async (_req, res) => {
   try {
     const items = await getItems()
     res.json(reply(0, 'ok', { images: items, total: items.length }))
@@ -59,7 +60,7 @@ router.get('/', async (_req, res) => {
   }
 })
 
-router.post('/', async (req, res) => {
+router.post('/', authMiddleware, async (req, res) => {
   try {
     const item = await addItem(req.body as Record<string, unknown>)
     res.json(reply(0, 'ok', item))
@@ -68,7 +69,7 @@ router.post('/', async (req, res) => {
   }
 })
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authMiddleware, async (req, res) => {
   try {
     await removeItem(req.params.id)
     res.json(reply(0, '删除成功'))

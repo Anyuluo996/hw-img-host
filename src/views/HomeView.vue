@@ -1,16 +1,11 @@
 <script setup lang="ts">
 import FileUploader from '@/components/public/FileUploader.vue'
 import { ref, watch } from 'vue'
-import { Upload, Image } from 'lucide-vue-next'
-import { Input } from '@/components/ui/input'
+import { Upload } from 'lucide-vue-next'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
-import { useRouter } from 'vue-router'
 
-const router = useRouter()
-
-const password = ref('')
 const quality = ref(0.7)
 const generateThumbnail = ref(false)
 
@@ -35,7 +30,12 @@ watch(uploadInfo, (val) => {
   if (val) {
     fetch('/api/kv', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(localStorage.getItem('hw_img_host_token')
+          ? { Authorization: `Bearer ${localStorage.getItem('hw_img_host_token')}` }
+          : {}),
+      },
       body: JSON.stringify(val),
     }).catch(() => {})
   }
@@ -44,7 +44,7 @@ watch(uploadInfo, (val) => {
 
 <template>
   <div class="min-h-screen bg-background">
-    <div class="flex min-h-screen flex-col items-center space-y-3 justify-center px-4 py-16">
+    <div class="flex min-h-screen flex-col items-center justify-center space-y-3 px-4 py-16">
       <div class="text-center">
         <div class="mb-3 flex items-center justify-center gap-2.5">
           <Upload class="h-6 w-6 text-foreground/60" :stroke-width="1.5" />
@@ -53,27 +53,8 @@ watch(uploadInfo, (val) => {
         <p class="text-sm text-muted-foreground">拖拽上传 · 压缩转码 · 直达链接</p>
       </div>
 
-      <button
-        class="inline-flex items-center gap-1.5 rounded-lg border border-border/50 px-3 py-1.5 text-xs text-muted-foreground transition hover:border-border hover:text-foreground"
-        @click="router.push('/gallery')"
-      >
-        <Image class="h-3.5 w-3.5" />
-        图库
-      </button>
-
       <div class="w-full max-w-md space-y-5">
         <div class="space-y-4 rounded-xl border border-border/50 bg-card px-5 py-4">
-          <div class="space-y-1.5">
-            <Label for="upload-password" class="text-xs text-muted-foreground">上传密码</Label>
-            <Input
-              id="upload-password"
-              v-model="password"
-              type="password"
-              placeholder="未设置则无需输入"
-              class="h-9"
-            />
-          </div>
-
           <div class="space-y-2">
             <div class="flex items-center justify-between">
               <Label class="text-xs text-muted-foreground">压缩质量</Label>
@@ -98,7 +79,6 @@ watch(uploadInfo, (val) => {
 
         <FileUploader
           v-model:uploadInfo="uploadInfo"
-          :password="password"
           :quality="quality"
           :generateThumbnail="generateThumbnail"
           :maxHeight="5000"

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import { uploadToCnb, signUpload, buildImageUrl, getErrorDetail } from '../_utils'
 import { reply } from '../_reply'
+import { authMiddleware } from '../_auth'
 
 const router = Router()
 
@@ -12,20 +13,12 @@ const upload = multer({
   },
 })
 
-router.get('/sign', async (req, res) => {
+router.get('/sign', authMiddleware, async (req, res) => {
   try {
     const fileName = req.query.name as string
     const fileSize = parseInt(req.query.size as string, 10)
     if (!fileName || !fileSize) {
       return res.status(400).json(reply(1, '缺少 name 或 size 参数'))
-    }
-
-    const uploadPassword = process.env.UPLOAD_PASSWORD
-    if (uploadPassword) {
-      const password = req.query.password as string
-      if (!password || password !== uploadPassword) {
-        return res.status(401).json(reply(1, '密码错误'))
-      }
     }
 
     const result = await signUpload({ fileName, fileSize })

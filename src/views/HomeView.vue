@@ -33,7 +33,7 @@ const uploadInfo = ref<{
 
 watch(uploadInfo, (val) => {
   if (val) {
-    fetch('/api/records', {
+    fetch('/api/kv', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(val),

@@ -1,3 +1,21 @@
+function getErrorDetail(err: unknown): string | undefined {
+  const data = (err as { response?: { data?: unknown } }).response?.data
+  if (typeof data === 'string') return data
+  if (Buffer.isBuffer(data)) return data.toString('utf8')
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
+  return undefined
+}
+
+function extractImagePath(rawPath: string): string {
+  const path = String(rawPath).split(/[?#]/)[0]
+  const match = path.match(/-\/(?:imgs|files)\/(.+)/)
+  return match ? match[1] : path
+}
+
+function buildImageUrl(baseUrl: string, rawPath: string): string {
+  return baseUrl + 'img-api/' + extractImagePath(rawPath)
+}
+
 async function requestUploadMeta(
   fileName: string,
   fileSize: number,
@@ -73,4 +91,4 @@ async function signUpload({
   return await requestUploadMeta(fileName, fileSize, type)
 }
 
-export { uploadToCnb, signUpload }
+export { uploadToCnb, signUpload, getErrorDetail, extractImagePath, buildImageUrl }

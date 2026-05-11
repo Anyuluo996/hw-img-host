@@ -75,7 +75,7 @@ async function fetchImages() {
   loading.value = true
   error.value = ''
   try {
-    const res = await fetch('/api/records')
+    const res = await fetch('/api/kv')
     const json: ListResponse = await res.json()
     if (json.code !== 0) {
       error.value = json.msg || '加载失败'

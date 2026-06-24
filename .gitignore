@@ -28,3 +28,6 @@ coverage
 *.sw?
 
 *.tsbuildinfo
+
+# 命令行上传工具的本地配置（含密码，勿提交）
+.upload.json

@@ -11,13 +11,13 @@
       @dragleave.prevent="isDragging = false"
       @drop.prevent="onDrop"
     >
-      <input type="file" accept="image/*" @change="onFileChange" class="hidden" />
+      <input type="file" @change="onFileChange" class="hidden" />
       <span v-if="!file">
-        {{ isDragging ? '释放文件上传' : '点击或拖拽上传图片' }}
+        {{ isDragging ? '释放文件上传' : '点击或拖拽上传文件' }}
       </span>
       <div v-else-if="processing" class="flex items-center gap-2 text-muted-foreground">
         <LoaderIcon class="h-5 w-5 animate-spin" />
-        <span>图片处理中...</span>
+        <span>文件处理中...</span>
       </div>
       <div v-else class="flex w-full items-center justify-center text-foreground/80">
         <span class="max-w-[90%] truncate text-sm" :title="file?.name">
@@ -31,7 +31,7 @@
     </label>
 
     <div v-if="file" class="mb-3 rounded-lg border border-border/50 px-3.5 py-3">
-      <p class="mb-2 text-xs text-muted-foreground">原图信息</p>
+      <p class="mb-2 text-xs text-muted-foreground">{{ isImage ? '原图信息' : '文件信息' }}</p>
       <div class="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground">
         <p>
           大小
@@ -41,13 +41,17 @@
           格式
           <span class="ml-1 text-foreground/70">{{ file.type || '未知' }}</span>
         </p>
-        <p>
+        <p v-if="isImage">
           压缩率
           <span class="ml-1 text-foreground/70">{{ compressionRatio.toFixed(2) }}%</span>
         </p>
-        <p>
+        <p v-if="isImage">
           尺寸
           <span class="ml-1 text-foreground/70">{{ imageWidth }}x{{ imageHeight }}</span>
+        </p>
+        <p v-else>
+          类型
+          <span class="ml-1 text-foreground/70">任意文件</span>
         </p>
       </div>
     </div>
@@ -146,7 +150,18 @@ interface SignResponse {
   data: {
     assets: { path: string }
     upload_url: string
+    type?: 'imgs' | 'files'
+    proxy_path?: string // 后端已拼好前缀的代理路径，如 /img-api/xxx 或 /file-api/xxx
   }
+}
+
+// 图片扩展名白名单，与后端 _utils.detectUploadType 保持一致
+const IMAGE_EXTS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tiff',
+])
+function isImageFile(name: string): boolean {
+  const m = String(name).toLowerCase().match(/\.([a-z0-9]+)$/)
+  return !!m && !!m[1] && IMAGE_EXTS.has(m[1])
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -180,6 +195,7 @@ const isDragging = ref<boolean>(false)
 const compressionRatio = ref<number>(0)
 const imageWidth = ref<number>(0)
 const imageHeight = ref<number>(0)
+const isImage = ref<boolean>(true)
 
 let qualityDebounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(
@@ -409,36 +425,49 @@ async function handleFile(f: File | null): Promise<void> {
 
   try {
     if (f.size > 20 * 1024 * 1024) {
-      errorMsg.value = '图片大小不能超过 20MB'
+      errorMsg.value = '文件大小不能超过 20MB'
       return
     }
     originalFile.value = f
-    const { compressedFile, width, height } = await compressImageToWebp(
-      f,
-      props.quality,
-      props.maxWidth,
-      props.maxHeight,
-    )
-    compressionRatio.value = ((f.size - compressedFile.size) / f.size) * 100
-    file.value = compressedFile
-    imageWidth.value = width
-    imageHeight.value = height
+    isImage.value = isImageFile(f.name)
 
-    if (props.generateThumbnail) {
-      const thumbnail = await generateThumbnailImage(compressedFile)
-      thumbnailFile.value = thumbnail.thumbnailFile
-      thumbnailPreview.value = thumbnail.previewUrl
-      thumbnailWidth.value = thumbnail.width
-      thumbnailHeight.value = thumbnail.height
-      thumbnailSize.value = thumbnail.size
+    if (isImage.value) {
+      // 图片：走原有的 canvas 压缩 + 缩略图流程
+      const { compressedFile, width, height } = await compressImageToWebp(
+        f,
+        props.quality,
+        props.maxWidth,
+        props.maxHeight,
+      )
+      compressionRatio.value = ((f.size - compressedFile.size) / f.size) * 100
+      file.value = compressedFile
+      imageWidth.value = width
+      imageHeight.value = height
+
+      if (props.generateThumbnail) {
+        const thumbnail = await generateThumbnailImage(compressedFile)
+        thumbnailFile.value = thumbnail.thumbnailFile
+        thumbnailPreview.value = thumbnail.previewUrl
+        thumbnailWidth.value = thumbnail.width
+        thumbnailHeight.value = thumbnail.height
+        thumbnailSize.value = thumbnail.size
+      }
+    } else {
+      // 非图片：原文件直传，不做压缩、不生成缩略图
+      file.value = f
+      compressionRatio.value = 0
+      imageWidth.value = 0
+      imageHeight.value = 0
+      thumbnailFile.value = null
+      thumbnailPreview.value = ''
     }
 
     errorMsg.value = ''
     uploadedUrl.value = ''
     uploadedThumbnailUrl.value = ''
   } catch (err) {
-    console.error('压缩失败:', err)
-    errorMsg.value = '图片处理失败'
+    console.error('处理失败:', err)
+    errorMsg.value = '文件处理失败'
   } finally {
     processing.value = false
   }
@@ -463,7 +492,7 @@ async function uploadFile(): Promise<void> {
       throw new Error(signRes.data.msg || '获取上传签名失败')
     }
 
-    const { assets, upload_url: uploadUrl } = signRes.data.data
+    const { assets, upload_url: uploadUrl, proxy_path: proxyPath } = signRes.data.data
 
     await axios.put(uploadUrl, file.value, {
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -475,7 +504,11 @@ async function uploadFile(): Promise<void> {
       timeout: 30000,
     })
 
-    const proxyUrl = window.location.origin + '/img-api/' + extractImagePath(assets.path)
+    // 代理路径优先用后端返回的 proxy_path（已含 img-api/file-api 正确前缀），
+    // 兜底用旧的 extractImagePath（老后端兼容）
+    const proxyUrl = proxyPath
+      ? window.location.origin + proxyPath
+      : window.location.origin + '/img-api/' + extractImagePath(assets.path)
     const originUrl = 'https://cnb.cool' + assets.path
 
     uploadedUrl.value = proxyUrl
@@ -506,8 +539,12 @@ async function uploadFile(): Promise<void> {
         timeout: 30000,
       })
 
-      thumbProxyUrl =
-        window.location.origin + '/img-api/' + extractImagePath(thumbSignRes.data.data.assets.path)
+      const thumbProxyPath = thumbSignRes.data.data.proxy_path
+      thumbProxyUrl = thumbProxyPath
+        ? window.location.origin + thumbProxyPath
+        : window.location.origin +
+          '/img-api/' +
+          extractImagePath(thumbSignRes.data.data.assets.path)
       thumbOriginUrl = 'https://cnb.cool' + thumbSignRes.data.data.assets.path
       uploadedThumbnailUrl.value = thumbProxyUrl
     }

@@ -1,0 +1,5 @@
+{
+  "_comment": "复制本文件为 .upload.json 并填入真实信息（.upload.json 已被 gitignore）",
+  "host": "https://cdn.anyul.cn",
+  "password": "你的上传密码"
+}

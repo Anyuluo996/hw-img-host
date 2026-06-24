@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import multer from 'multer'
-import { uploadToCnb, signUpload, buildImageUrl, getErrorDetail } from '../_utils'
+import { uploadToCnb, signUpload, buildAccessUrl, getErrorDetail } from '../_utils'
 import { reply } from '../_reply'
 import { authMiddleware } from '../_auth'
 
@@ -21,8 +21,16 @@ router.get('/sign', authMiddleware, async (req, res) => {
       return res.status(400).json(reply(1, '缺少 name 或 size 参数'))
     }
 
+    // type 由文件名自动判断：图片走 imgs，其余走 files（见 _utils.detectUploadType）
     const result = await signUpload({ fileName, fileSize })
-    res.json(reply(0, 'ok', result))
+    // 前端依赖 type 拼代理路径（img-api vs file-api）
+    res.json(
+      reply(0, 'ok', {
+        ...result,
+        type: result.type,
+        proxy_path: buildAccessUrl('', result.assets.path as string),
+      }),
+    )
   } catch (e: unknown) {
     res.status(500).json(reply(1, '获取上传签名失败', { message: (e as Error).message }))
   }
@@ -53,12 +61,17 @@ router.post(
       const thumbnailFile = files.thumbnail?.[0]
       const baseUrl = process.env.BASE_IMG_URL!
 
+      // type 由文件名自动判断，图片走 imgs，非图片走 files
       const mainResult = await uploadToCnb({
         fileBuffer: mainFile.buffer,
         fileName: mainFile.originalname,
       })
 
-      let thumbnailResult: { assets: Record<string, unknown>; url: unknown } | null = null
+      let thumbnailResult: {
+        assets: Record<string, unknown>
+        url: unknown
+        type: string
+      } | null = null
       if (thumbnailFile) {
         thumbnailResult = await uploadToCnb({
           fileBuffer: thumbnailFile.buffer,
@@ -68,12 +81,13 @@ router.post(
 
       res.json(
         reply(0, '上传成功', {
-          url: buildImageUrl(baseUrl, mainResult.url as string),
+          url: buildAccessUrl(baseUrl, mainResult.url as string),
           thumbnailUrl: thumbnailResult
-            ? buildImageUrl(baseUrl, thumbnailResult.url as string)
+            ? buildAccessUrl(baseUrl, thumbnailResult.url as string)
             : null,
           assets: mainResult.assets,
           thumbnailAssets: thumbnailResult?.assets ?? null,
+          type: mainResult.type,
           hasThumbnail: !!thumbnailFile,
         }),
       )

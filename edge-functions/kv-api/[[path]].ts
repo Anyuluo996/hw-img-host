@@ -85,22 +85,45 @@ function genId(): string {
 
 type RecordItem = Record<string, unknown>
 
+// 从 kv.list() 的返回值里稳健地提取 key 列表。
+// EdgeOne 不同版本/环境的 list 返回结构可能不同，这里兼容多种：
+//  - { complete, cursor, keys: [{name}] }（文档约定）
+//  - 直接返回 [{name}] 或 ['key1','key2']
+//  - undefined / null（无数据或异常）
+function extractKeys(result: unknown): { names: string[]; complete: boolean; cursor?: string } {
+  if (!result) return { names: [], complete: true }
+  // 情况1: { keys: [...] }
+  if (Array.isArray((result as { keys?: unknown }).keys)) {
+    const r = result as { keys: unknown[]; complete?: boolean; cursor?: string }
+    const names = r.keys.map((k) => (typeof k === 'string' ? k : (k as { name?: string }).name || ''))
+    return { names: names.filter(Boolean), complete: r.complete !== false, cursor: r.cursor }
+  }
+  // 情况2: 直接是数组
+  if (Array.isArray(result)) {
+    const names = result.map((k) => (typeof k === 'string' ? k : (k as { name?: string }).name || ''))
+    return { names: names.filter(Boolean), complete: true }
+  }
+  return { names: [], complete: true }
+}
+
 // 列出所有记录：list 前缀扫描翻页拿 key，再批量 get 取值
 async function listItems(): Promise<RecordItem[]> {
   const kv = getKV()
   const allKeys: string[] = []
   let cursor: string | undefined
-  let result
+  let result: unknown
+  let guard = 0
   do {
-    // cursor 必须是字符串，首次不传（undefined 会导致 "cursor type invalid"）
+    if (guard++ > 50) break // 防止无限翻页
     const opts: { prefix: string; limit: number; cursor?: string } = {
       prefix: KEY_PREFIX,
       limit: 256,
     }
     if (cursor) opts.cursor = cursor
     result = await kv.list(opts)
-    for (const k of result.keys) allKeys.push(k.name)
-    cursor = result.complete ? undefined : result.cursor
+    const parsed = extractKeys(result)
+    allKeys.push(...parsed.names)
+    cursor = parsed.complete ? undefined : parsed.cursor
   } while (cursor)
 
   // 并发取值

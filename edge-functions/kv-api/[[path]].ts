@@ -213,6 +213,35 @@ export async function onRequest(context: {
 
   try {
     if (method === 'GET') {
+      // 诊断模式：?debug=1 返回 list 的原始结构，排查 list 返回格式
+      const url = new URL(context.request.url)
+      if (url.searchParams.get('debug') === '1') {
+        const kv = getKV()
+        let rawList, rawGet
+        try {
+          const opts: { prefix: string; limit: number } = { prefix: KEY_PREFIX, limit: 10 }
+          rawList = await kv.list(opts)
+        } catch (e: unknown) {
+          rawList = { __error: (e as Error).message }
+        }
+        try {
+          rawGet = await kv.get('img_kv', 'json')
+        } catch (e: unknown) {
+          rawGet = { __error: (e as Error).message }
+        }
+        return jsonRes({
+          code: 0,
+          msg: 'debug',
+          data: {
+            listRaw: JSON.parse(JSON.stringify(rawList)),
+            listType: typeof rawList,
+            isArray: Array.isArray(rawList),
+            keysField: rawList && typeof rawList === 'object' ? Array.isArray((rawList as { keys?: unknown }).keys) : 'n/a',
+            legacyImgKv: JSON.parse(JSON.stringify(rawGet)),
+          },
+        })
+      }
+
       // 列表前先尝试迁移旧数据（幂等：迁移完旧 key 被删，下次直接跳过）
       await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
       const items = await listItems()

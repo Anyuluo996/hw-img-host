@@ -5,9 +5,47 @@ import { Upload } from 'lucide-vue-next'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import { toast } from 'vue-sonner'
 
 const quality = ref(0.7)
 const generateThumbnail = ref(false)
+
+// tag 输入状态
+const tags = ref<string[]>([])
+const tagInput = ref('')
+const gallerySaved = ref(false)
+
+function addTag() {
+  const parts = tagInput.value
+    .split(/[,，]/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+  for (const p of parts) {
+    if (!tags.value.includes(p)) tags.value.push(p)
+  }
+  tagInput.value = ''
+}
+function removeTag(t: string) {
+  tags.value = tags.value.filter((x) => x !== t)
+}
+
+// 保存到画廊（带上 tag）
+function saveToGallery() {
+  if (!uploadInfo.value) return
+  gallerySaved.value = true
+  fetch('/kv-api', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(localStorage.getItem('hw_img_host_token')
+        ? { Authorization: `Bearer ${localStorage.getItem('hw_img_host_token')}` }
+        : {}),
+    },
+    body: JSON.stringify({ ...uploadInfo.value, tags: tags.value }),
+  })
+    .then(() => toast.success('已保存到画廊'))
+    .catch(() => toast.error('保存到画廊失败'))
+}
 
 const uploadInfo = ref<{
   url: string
@@ -24,20 +62,16 @@ const uploadInfo = ref<{
   thumbnailWidth: number
   thumbnailHeight: number
   thumbnailSize: number
+  assetsPath?: string
+  tags?: string[]
 } | null>(null)
 
+// 上传后重置 tag 状态（等用户在上传完成区填 tag 再保存）
 watch(uploadInfo, (val) => {
   if (val) {
-    fetch('/kv-api', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(localStorage.getItem('hw_img_host_token')
-          ? { Authorization: `Bearer ${localStorage.getItem('hw_img_host_token')}` }
-          : {}),
-      },
-      body: JSON.stringify(val),
-    }).catch(() => {})
+    tags.value = []
+    tagInput.value = ''
+    gallerySaved.value = false
   }
 })
 </script>
@@ -144,6 +178,37 @@ watch(uploadInfo, (val) => {
                 {{ uploadInfo.thumbnailOriginalUrl }}
               </a>
             </div>
+          </div>
+
+          <!-- tag 输入 + 保存到画廊 -->
+          <div class="space-y-2.5 border-t border-border/30 px-5 py-3.5">
+            <div class="flex items-center gap-2">
+              <span class="w-17 shrink-0 text-xs text-muted-foreground/70">标签</span>
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span
+                  v-for="t in tags"
+                  :key="t"
+                  class="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs text-foreground/80"
+                >
+                  {{ t }}
+                  <button class="text-muted-foreground/60 hover:text-destructive" @click="removeTag(t)">×</button>
+                </span>
+                <input
+                  v-model="tagInput"
+                  placeholder="输入标签，逗号或回车添加"
+                  class="min-w-32 flex-1 bg-transparent text-xs text-foreground/80 outline-none placeholder:text-muted-foreground/40"
+                  @keydown.enter.prevent="addTag"
+                  @keydown.,.prevent="addTag"
+                />
+              </div>
+            </div>
+            <button
+              :disabled="gallerySaved"
+              class="w-full rounded-lg bg-foreground py-2 text-xs text-background transition hover:bg-foreground/90 disabled:cursor-not-allowed disabled:opacity-50"
+              @click="saveToGallery"
+            >
+              {{ gallerySaved ? '已保存到画廊' : '保存到画廊' }}
+            </button>
           </div>
         </div>
       </Transition>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Image, Copy, Check, ExternalLink, ArrowLeft, Loader2, Trash2, Search } from 'lucide-vue-next'
+import { Image, Copy, Check, ExternalLink, ArrowLeft, Loader2, Trash2, Search, Tag } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from 'vue-sonner'
@@ -27,6 +27,8 @@ interface ImageRecord {
   createdAt: string
   // 删除所需：原始 CNB path（形如 /slug/-/imgs/ID/uuid.png）
   assetsPath?: string
+  // 标签数组
+  tags?: string[]
   // 旧记录可能没有，兼容字段
   _key?: string
 }
@@ -58,6 +60,17 @@ const copiedId = ref('')
 // 搜索与筛选
 const search = ref('')
 const filter = ref<'all' | 'image' | 'file'>('all')
+const filterTag = ref<string>('') // 按 tag 筛选
+
+// 所有已用过的 tag 列表（供筛选下拉）
+const allTags = computed(() => {
+  const s = new Set<string>()
+  for (const img of images.value) {
+    if (Array.isArray(img.tags)) for (const t of img.tags) if (t) s.add(t)
+  }
+  return Array.from(s).sort()
+})
+
 const filteredImages = computed(() => {
   let list = images.value
   if (filter.value !== 'all') {
@@ -65,12 +78,66 @@ const filteredImages = computed(() => {
       filter.value === 'image' ? isImageName(img.name) : !isImageName(img.name),
     )
   }
+  if (filterTag.value) {
+    const t = filterTag.value.toLowerCase()
+    list = list.filter((img) =>
+      Array.isArray(img.tags) ? img.tags.some((x) => x.toLowerCase() === t) : false,
+    )
+  }
   const kw = search.value.trim().toLowerCase()
   if (kw) {
-    list = list.filter((img) => img.name.toLowerCase().includes(kw))
+    list = list.filter((img) => {
+      const inName = img.name.toLowerCase().includes(kw)
+      const inTag = Array.isArray(img.tags) && img.tags.some((t) => t.toLowerCase().includes(kw))
+      return inName || inTag
+    })
   }
   return list
 })
+
+// tag 编辑状态
+const editingId = ref('') // 正在编辑 tag 的记录 id
+const editTagsInput = ref('')
+const savingTags = ref(false)
+
+function startEditTags(img: ImageRecord) {
+  editingId.value = img.id
+  editTagsInput.value = (img.tags || []).join(', ')
+}
+function cancelEditTags() {
+  editingId.value = ''
+  editTagsInput.value = ''
+}
+async function saveEditTags(img: ImageRecord) {
+  const tags = editTagsInput.value
+    .split(/[,，]/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+  savingTags.value = true
+  try {
+    const res = await fetch(`/kv-api/${img.id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+      },
+      body: JSON.stringify({ tags }),
+    })
+    const json = await res.json()
+    if (json.code !== 0) {
+      toast.error(json.msg || '保存标签失败')
+      return
+    }
+    // 本地更新
+    img.tags = tags
+    toast.success('标签已更新')
+    editingId.value = ''
+  } catch {
+    toast.error('保存标签失败')
+  } finally {
+    savingTags.value = false
+  }
+}
 
 // 批量选择
 const selectedIds = ref(new Set<string>())
@@ -259,11 +326,11 @@ onMounted(() => {
       </div>
 
       <template v-else>
-        <!-- 工具栏：搜索 + 类型筛选 + 选择模式 -->
+        <!-- 工具栏：搜索 + 类型筛选 + tag筛选 + 选择模式 -->
         <div class="mb-5 flex flex-wrap items-center gap-3">
           <div class="relative flex-1 min-w-48">
             <Search class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/50" />
-            <Input v-model="search" placeholder="搜索文件名..." class="pl-9" />
+            <Input v-model="search" placeholder="搜索文件名或标签..." class="pl-9" />
           </div>
           <div class="flex items-center gap-1 rounded-lg border border-border/50 p-0.5">
             <button
@@ -276,6 +343,14 @@ onMounted(() => {
               {{ opt.t }}
             </button>
           </div>
+          <select
+            v-if="allTags.length > 0"
+            v-model="filterTag"
+            class="rounded-lg border border-border/50 bg-card px-3 py-1.5 text-xs text-foreground/80 outline-none"
+          >
+            <option value="">所有标签</option>
+            <option v-for="t in allTags" :key="t" :value="t">{{ t }}</option>
+          </select>
           <Button variant="outline" size="sm" :disabled="deleting" @click="selectMode = !selectMode">
             {{ selectMode ? '取消选择' : '批量管理' }}
           </Button>
@@ -364,6 +439,15 @@ onMounted(() => {
                 </a>
                 <button
                   v-if="!selectMode"
+                  class="rounded-md bg-background/80 p-1.5 opacity-0 backdrop-blur-sm transition hover:bg-background group-hover:opacity-100"
+                  title="编辑标签"
+                  :disabled="savingTags"
+                  @click="startEditTags(img)"
+                >
+                  <Tag class="h-3.5 w-3.5 text-foreground/70" />
+                </button>
+                <button
+                  v-if="!selectMode"
                   class="rounded-md bg-background/80 p-1.5 opacity-0 backdrop-blur-sm transition hover:bg-destructive hover:text-destructive-foreground group-hover:opacity-100"
                   title="删除"
                   :disabled="deleting"
@@ -387,6 +471,35 @@ onMounted(() => {
                 <span v-if="isImageName(img.name)">压缩 {{ formatRatio(img.compressionRatio) }}</span>
                 <span v-else>-</span>
                 <span>{{ formatDate(img.createdAt) }}</span>
+              </div>
+              <!-- tag 显示 -->
+              <div v-if="editingId !== img.id && img.tags && img.tags.length" class="flex flex-wrap gap-1 pt-0.5">
+                <span
+                  v-for="t in img.tags"
+                  :key="t"
+                  class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
+                >{{ t }}</span>
+              </div>
+              <!-- tag 编辑面板 -->
+              <div v-if="editingId === img.id" class="space-y-1.5 pt-1">
+                <input
+                  v-model="editTagsInput"
+                  placeholder="逗号分隔，如：动漫, 风景"
+                  class="w-full rounded border border-border/50 bg-background px-2 py-1 text-[11px] outline-none focus:border-foreground/40"
+                  @keydown.enter.prevent="saveEditTags(img)"
+                  @keydown.esc="cancelEditTags"
+                />
+                <div class="flex gap-1.5">
+                  <button
+                    class="flex-1 rounded bg-foreground py-1 text-[10px] text-background disabled:opacity-50"
+                    :disabled="savingTags"
+                    @click="saveEditTags(img)"
+                  >保存</button>
+                  <button
+                    class="flex-1 rounded border border-border/50 py-1 text-[10px] text-muted-foreground"
+                    @click="cancelEditTags"
+                  >取消</button>
+                </div>
               </div>
             </div>
           </div>

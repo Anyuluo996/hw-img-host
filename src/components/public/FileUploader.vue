@@ -130,6 +130,8 @@ interface UploadInfo {
   thumbnailSize: number
   // 原始 CNB path，删除文件时需要（形如 /slug/-/imgs/ID/uuid.png）
   assetsPath?: string
+  // 标签数组，随机图检索用
+  tags?: string[]
 }
 
 interface CompressResult {

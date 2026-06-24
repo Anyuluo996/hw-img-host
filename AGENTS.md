@@ -34,11 +34,14 @@ Browser (Vue 3 SPA)
   │    └─ returns proxy URLs + assets.path (path needed for later deletion)
   ├─ File index → /kv-api (EdgeOne KV, edge function)
   │    └─ each record stored as its own key `img_{id}` (list via prefix scan)
+  │    └─ supports tags: string[] for categorization
+  │    └─ methods: GET (list) / POST (add) / PUT /{id} (update tags) / DELETE /{id} (remove)
   └─ Delete file → DELETE /kv-api/{id} (remove index) + DELETE /api/delete { path } (remove CNB file)
 
 Image/file serving:
   GET /img-api/*  → edge-functions/img-api/[[path]].ts  → proxies CNB -/imgs/ (images, inline)
   GET /file-api/* → edge-functions/file-api/[[path]].ts → proxies CNB -/files/ (force download)
+  GET /img?tag=   → edge-functions/img/index.ts → random image 302 redirect (public, no auth; ?tag=a,b OR-match)
 ```
 
 - **Frontend**: Vue 3 + `<script setup lang="ts">` + Composition API. Three routes: `/` (HomeView), `/gallery` (GalleryView), `/login` (LoginView). Auth via `useAuth` composable (`src/composables/useAuth.ts`) — JWT stored in localStorage, axios interceptor adds Bearer token to all requests. Login redirect is handled by router guard in `src/router/index.ts`.

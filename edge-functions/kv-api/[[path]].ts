@@ -179,6 +179,26 @@ async function addItem(item: RecordItem): Promise<RecordItem> {
   return newItem
 }
 
+// 读单条记录
+async function getItem(id: string): Promise<RecordItem | null> {
+  try {
+    const v = (await getKV().get(KEY_PREFIX + id, 'json')) as RecordItem | null
+    return v
+  } catch {
+    return null
+  }
+}
+
+// 更新单条记录：读旧值 → 合并传入字段 → 写回。用于改 tag。
+async function updateItem(id: string, patch: RecordItem): Promise<RecordItem | null> {
+  const kv = getKV()
+  const old = await getItem(id)
+  if (!old) return null
+  const updated = { ...old, ...patch, id }
+  await kv.put(KEY_PREFIX + id, JSON.stringify(updated))
+  return updated
+}
+
 async function removeItem(id: string): Promise<void> {
   await getKV().delete(KEY_PREFIX + id)
 }
@@ -192,7 +212,7 @@ export async function onRequest(context: {
     return new Response(null, {
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Authorization, Content-Type',
       },
     })
@@ -235,6 +255,19 @@ export async function onRequest(context: {
       const body = (await context.request.json()) as Record<string, unknown>
       const item = await addItem(body)
       return jsonRes({ code: 0, msg: 'ok', data: item })
+    }
+
+    if (method === 'PUT') {
+      const id = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      if (!id) {
+        return jsonRes({ code: 1, msg: '缺少 id' }, 400)
+      }
+      const body = (await context.request.json()) as Record<string, unknown>
+      const updated = await updateItem(id, body as RecordItem)
+      if (!updated) {
+        return jsonRes({ code: 1, msg: '记录不存在' }, 404)
+      }
+      return jsonRes({ code: 0, msg: 'ok', data: updated })
     }
 
     if (method === 'DELETE') {

@@ -144,14 +144,17 @@ interface ThumbnailResult {
   size: number
 }
 
-interface SignResponse {
+// 后端 /api/upload/img 转发路由的响应（服务器端代传到 CNB，避免浏览器跨域 403）
+interface UploadResponse {
   code: number
   msg?: string
   data: {
+    url: string // 已含完整 origin 的代理链接
+    thumbnailUrl: string | null
     assets: { path: string }
-    upload_url: string
+    thumbnailAssets: { path: string } | null
     type?: 'imgs' | 'files'
-    proxy_path?: string // 后端已拼好前缀的代理路径，如 /img-api/xxx 或 /file-api/xxx
+    hasThumbnail: boolean
   }
 }
 
@@ -387,15 +390,6 @@ async function generateThumbnailImage(file: File): Promise<ThumbnailResult> {
   })
 }
 
-function extractImagePath(url: string): string {
-  if (url.includes('-/imgs/')) {
-    return url.split('-/imgs/')[1] || url
-  } else if (url.includes('-/files/')) {
-    return url.split('-/files/')[1] || url
-  }
-  return url
-}
-
 function onFileChange(e: Event): void {
   const target = e.target as HTMLInputElement
   const f = target.files?.[0]
@@ -482,77 +476,39 @@ async function uploadFile(): Promise<void> {
     uploading.value = true
     uploadProgress.value = 0
 
-    const signRes = await axios.get<SignResponse>('/api/upload/sign', {
-      params: {
-        name: file.value.name,
-        size: file.value.size,
-      },
-    })
-    if (signRes.data.code !== 0) {
-      throw new Error(signRes.data.msg || '获取上传签名失败')
+    // 走后端 /api/upload/img 转发上传，由服务器代传到 CNB，
+    // 避免浏览器直传 asset.cnb.cool 触发跨域 Origin 校验 403（网络错误）。
+    const form = new FormData()
+    form.append('file', file.value)
+    if (thumbnailFile.value) {
+      form.append('thumbnail', thumbnailFile.value)
     }
 
-    const { assets, upload_url: uploadUrl, proxy_path: proxyPath } = signRes.data.data
-
-    await axios.put(uploadUrl, file.value, {
-      headers: { 'Content-Type': 'application/octet-stream' },
+    const uploadRes = await axios.post<UploadResponse>('/api/upload/img', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (e: AxiosProgressEvent) => {
         if (e.total) {
           uploadProgress.value = Math.round((e.loaded / e.total) * 100)
         }
       },
-      timeout: 30000,
+      timeout: 60000,
     })
+    if (uploadRes.data.code !== 0) {
+      throw new Error(uploadRes.data.msg || '上传失败')
+    }
 
-    // 代理路径优先用后端返回的 proxy_path（已含 img-api/file-api 正确前缀），
-    // 兜底用旧的 extractImagePath（老后端兼容）
-    const proxyUrl = proxyPath
-      ? window.location.origin + proxyPath
-      : window.location.origin + '/img-api/' + extractImagePath(assets.path)
+    const { url: proxyUrl, assets, thumbnailUrl: thumbProxyUrl, thumbnailAssets } =
+      uploadRes.data.data
     const originUrl = 'https://cnb.cool' + assets.path
+    const thumbOriginUrl = thumbnailAssets ? 'https://cnb.cool' + thumbnailAssets.path : undefined
 
     uploadedUrl.value = proxyUrl
-
-    let thumbProxyUrl: string | undefined
-    let thumbOriginUrl: string | undefined
-
-    if (thumbnailFile.value) {
-      uploadProgress.value = 0
-
-      const thumbSignRes = await axios.get<SignResponse>('/api/upload/sign', {
-        params: {
-          name: thumbnailFile.value.name,
-          size: thumbnailFile.value.size,
-        },
-      })
-      if (thumbSignRes.data.code !== 0) {
-        throw new Error(thumbSignRes.data.msg || '获取缩略图上传签名失败')
-      }
-
-      await axios.put(thumbSignRes.data.data.upload_url, thumbnailFile.value, {
-        headers: { 'Content-Type': 'application/octet-stream' },
-        onUploadProgress: (e: AxiosProgressEvent) => {
-          if (e.total) {
-            uploadProgress.value = Math.round((e.loaded / e.total) * 100)
-          }
-        },
-        timeout: 30000,
-      })
-
-      const thumbProxyPath = thumbSignRes.data.data.proxy_path
-      thumbProxyUrl = thumbProxyPath
-        ? window.location.origin + thumbProxyPath
-        : window.location.origin +
-          '/img-api/' +
-          extractImagePath(thumbSignRes.data.data.assets.path)
-      thumbOriginUrl = 'https://cnb.cool' + thumbSignRes.data.data.assets.path
-      uploadedThumbnailUrl.value = thumbProxyUrl
-    }
+    if (thumbProxyUrl) uploadedThumbnailUrl.value = thumbProxyUrl
 
     const uploadInfo: UploadInfo = {
       url: proxyUrl,
       urlOriginal: originUrl,
-      thumbnailUrl: thumbProxyUrl,
+      thumbnailUrl: thumbProxyUrl ?? undefined,
       thumbnailOriginalUrl: thumbOriginUrl,
       name: file.value.name,
       size: file.value.size,
@@ -560,7 +516,7 @@ async function uploadFile(): Promise<void> {
       compressionRatio: compressionRatio.value,
       width: imageWidth.value,
       height: imageHeight.value,
-      hasThumbnail: props.generateThumbnail,
+      hasThumbnail: !!thumbnailFile.value,
       thumbnailWidth: thumbnailWidth.value,
       thumbnailHeight: thumbnailHeight.value,
       thumbnailSize: thumbnailSize.value,

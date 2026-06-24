@@ -38,7 +38,7 @@ function extractImagePath(rawPath: string): string {
 // 图片用 img-api（旧，兼容），文件用 file-api
 function buildAccessUrl(baseUrl: string, rawPath: string): string {
   const proxyPrefix = String(rawPath).includes('/-/imgs/') ? 'img-api' : 'file-api'
-  return baseUrl + proxyPrefix + '/' + extractImagePath(rawPath)
+  return baseUrl.replace(/\/$/, '') + '/' + proxyPrefix + '/' + extractImagePath(rawPath)
 }
 
 // 兼容旧调用名（buildImageUrl 现已按类型自动路由，保留别名）

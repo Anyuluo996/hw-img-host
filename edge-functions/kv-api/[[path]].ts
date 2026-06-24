@@ -86,21 +86,27 @@ function genId(): string {
 type RecordItem = Record<string, unknown>
 
 // 从 kv.list() 的返回值里稳健地提取 key 列表。
-// EdgeOne 不同版本/环境的 list 返回结构可能不同，这里兼容多种：
-//  - { complete, cursor, keys: [{name}] }（文档约定）
-//  - 直接返回 [{name}] 或 ['key1','key2']
-//  - undefined / null（无数据或异常）
+// EdgeOne 实际返回 { complete, cursor, keys:[{key, expiration, meta}] }，
+// 注意 key 对象的字段名是 `key`（不是文档说的 `name`）。这里兼容两者。
 function extractKeys(result: unknown): { names: string[]; complete: boolean; cursor?: string } {
   if (!result) return { names: [], complete: true }
   // 情况1: { keys: [...] }
   if (Array.isArray((result as { keys?: unknown }).keys)) {
     const r = result as { keys: unknown[]; complete?: boolean; cursor?: string }
-    const names = r.keys.map((k) => (typeof k === 'string' ? k : (k as { name?: string }).name || ''))
+    const names = r.keys.map((k) => {
+      if (typeof k === 'string') return k
+      const obj = k as { key?: string; name?: string }
+      return obj.key || obj.name || ''
+    })
     return { names: names.filter(Boolean), complete: r.complete !== false, cursor: r.cursor }
   }
   // 情况2: 直接是数组
   if (Array.isArray(result)) {
-    const names = result.map((k) => (typeof k === 'string' ? k : (k as { name?: string }).name || ''))
+    const names = result.map((k) => {
+      if (typeof k === 'string') return k
+      const obj = k as { key?: string; name?: string }
+      return obj.key || obj.name || ''
+    })
     return { names: names.filter(Boolean), complete: true }
   }
   return { names: [], complete: true }
@@ -213,35 +219,6 @@ export async function onRequest(context: {
 
   try {
     if (method === 'GET') {
-      // 诊断模式：?debug=1 返回 list 的原始结构，排查 list 返回格式
-      const url = new URL(context.request.url)
-      if (url.searchParams.get('debug') === '1') {
-        const kv = getKV()
-        let rawList, rawGet
-        try {
-          const opts: { prefix: string; limit: number } = { prefix: KEY_PREFIX, limit: 10 }
-          rawList = await kv.list(opts)
-        } catch (e: unknown) {
-          rawList = { __error: (e as Error).message }
-        }
-        try {
-          rawGet = await kv.get('img_kv', 'json')
-        } catch (e: unknown) {
-          rawGet = { __error: (e as Error).message }
-        }
-        return jsonRes({
-          code: 0,
-          msg: 'debug',
-          data: {
-            listRaw: JSON.parse(JSON.stringify(rawList)),
-            listType: typeof rawList,
-            isArray: Array.isArray(rawList),
-            keysField: rawList && typeof rawList === 'object' ? Array.isArray((rawList as { keys?: unknown }).keys) : 'n/a',
-            legacyImgKv: JSON.parse(JSON.stringify(rawGet)),
-          },
-        })
-      }
-
       // 列表前先尝试迁移旧数据（幂等：迁移完旧 key 被删，下次直接跳过）
       await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
       const items = await listItems()

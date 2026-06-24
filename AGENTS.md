@@ -27,25 +27,30 @@
 Browser (Vue 3 SPA)
   ├─ Password login → POST /api/auth/login
   │    └─ returns JWT token (7d expiry, stored in localStorage)
-  ├─ Get upload signature → GET /api/upload/sign?name=&size= (auth required)
-  │    └─ returns CNB PUT URL for client-side direct upload
-  └─ Server-side upload → POST /api/upload/img (multipart/form-data, multer 20MB)
-       └─ compresses server-side → uploads to CNB → returns proxy URLs
+  ├─ Server-side upload → POST /api/upload/img (multipart/form-data, multer 20MB)
+  │    └─ auto-detects type by extension:
+  │         ├─ image (png/jpg/webp/...) → CNB imgs endpoint (TOKEN_IMG) → /img-api/* proxy
+  │         └─ other (pdf/zip/...)      → CNB files endpoint (TOKEN_FILE) → /file-api/* proxy
+  │    └─ returns proxy URLs + assets.path (path needed for later deletion)
+  ├─ File index → /kv-api (EdgeOne KV, edge function)
+  │    └─ each record stored as its own key `img_{id}` (list via prefix scan)
+  └─ Delete file → DELETE /kv-api/{id} (remove index) + DELETE /api/delete { path } (remove CNB file)
 
-Image serving:
-  GET /img-api/* (e.g. https://img.example.com/img-api/path/to/img.webp)
-    └─ edge-functions/img-api/[[path]].ts (EdgeOne Edge Function)
-         └─ proxies to CNB with CORS + 30s cache
+Image/file serving:
+  GET /img-api/*  → edge-functions/img-api/[[path]].ts  → proxies CNB -/imgs/ (images, inline)
+  GET /file-api/* → edge-functions/file-api/[[path]].ts → proxies CNB -/files/ (force download)
 ```
 
 - **Frontend**: Vue 3 + `<script setup lang="ts">` + Composition API. Three routes: `/` (HomeView), `/gallery` (GalleryView), `/login` (LoginView). Auth via `useAuth` composable (`src/composables/useAuth.ts`) — JWT stored in localStorage, axios interceptor adds Bearer token to all requests. Login redirect is handled by router guard in `src/router/index.ts`.
-- **Backend API**: `node-functions/api/[[default]].ts` mounts two Express sub-routers:
+- **Backend API**: `node-functions/api/[[default]].ts` mounts Express sub-routers:
   - `routes/auth.ts` — `POST /api/auth/login` (validates `UPLOAD_PASSWORD`, returns JWT)
-  - `routes/upload.ts` — `GET /api/upload/sign` (auth required, returns CNB upload signature) + `POST /api/upload/img` (direct multer upload to CNB)
+  - `routes/upload.ts` — `GET /api/upload/sign` + `POST /api/upload/img` (auto-routes imgs/files by extension)
+  - `routes/delete.ts` — `DELETE /api/delete` (single) + `POST /api/delete/batch` (batch); calls CNB DELETE API (TOKEN_DELETE, `repo-manage:rw`)
   - `_auth.ts` — JWT sign/verify using `UPLOAD_PASSWORD` as secret; `authMiddleware` for route protection
-  - `_utils.ts` — `uploadToCnb()`, `signUpload()`, `buildImageUrl()`, `extractImagePath()`
+  - `_utils.ts` — `uploadToCnb()`, `signUpload()`, `deleteFromCnb()`, `buildAccessUrl()`, `extractImagePath()`, `detectUploadType()`
   - `_reply.ts` — `reply()` helper, shape: `{ code, msg, data }` (code=0 is success)
-- **Edge proxy**: `edge-functions/img-api/[[path]].ts` — catches `/img-api/*`, forwards to CNB with CORS headers.
+- **Edge proxy**: `edge-functions/img-api/` and `edge-functions/file-api/` catch `/img-api/*` and `/file-api/*`, forward to CNB with CORS headers.
+- **Edge KV index**: `edge-functions/kv-api/[[path]].ts` — GET (list via prefix scan) / POST (add) / DELETE (remove). Each record in its own KV key `img_{id}`; auto-migrates legacy single-array `img_kv` key on first list.
 - **`[[default]].ts` / `[[path]].ts`** naming is EdgeOne Pages convention (catch-all and dynamic route functions). Do not rename.
 - **No tests exist** in this project.
 
@@ -55,9 +60,11 @@ These are set in EdgeOne console — not in code or `.env` files:
 
 | Variable          | Example                                                                                |
 | ----------------- | -------------------------------------------------------------------------------------- |
-| `BASE_IMG_URL`    | `https://img.example.com/` (trailing slash required)                                   |
+| `BASE_IMG_URL`    | `https://img.example.com/` (trailing slash optional)                                   |
 | `SLUG_IMG`        | `username/repo-name`                                                                   |
-| `TOKEN_IMG`       | CNB personal access token                                                              |
+| `TOKEN_IMG`       | CNB token with image upload scope (for imgs endpoint)                                  |
+| `TOKEN_FILE`      | CNB token with `repo-notes:rw` scope (for files endpoint, arbitrary files)             |
+| `TOKEN_DELETE`    | CNB token with `repo-manage:rw` scope (for deleting uploaded imgs/files); optional     |
 | `UPLOAD_PASSWORD` | Upload password (doubles as JWT secret; if empty/unset, login and sign endpoints fail) |
 
 ## Code conventions

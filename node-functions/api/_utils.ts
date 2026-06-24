@@ -135,9 +135,44 @@ async function signUpload({
   return { ...data, type: uploadType }
 }
 
+// 删除 CNB 上已上传的文件。imgs/files 都有官方 DELETE API，需 repo-manage:rw token。
+// rawPath 形如 /slug/-/imgs/<ID>/<uuid>.png 或 /slug/-/files/<ID>/<uuid>/<文件名>
+async function deleteFromCnb(rawPath: string) {
+  const path = String(rawPath).split(/[?#]/)[0]
+  const token = process.env.TOKEN_DELETE
+  if (!token) {
+    throw new Error('缺少环境变量 TOKEN_DELETE（删除需要 repo-manage:rw 权限的 CNB token）')
+  }
+  const slug = process.env.SLUG_IMG
+  if (!slug) {
+    throw new Error('缺少环境变量 SLUG_IMG')
+  }
+  // extractImagePath 的输出正是 CNB DELETE 需要的 imgPath/filePath
+  const subPath = extractImagePath(path)
+  const deleteUrl = `https://api.cnb.cool/${slug}/-/${path.includes('/-/imgs/') ? 'imgs' : 'files'}/${subPath}`
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000)
+  try {
+    const resp = await fetch(deleteUrl, {
+      method: 'DELETE',
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      throw new Error(`删除 CNB 文件失败: ${resp.status} ${resp.statusText} ${errText}`)
+    }
+    return { ok: true, deletedUrl: deleteUrl }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export {
   uploadToCnb,
   signUpload,
+  deleteFromCnb,
   getErrorDetail,
   extractImagePath,
   buildImageUrl,

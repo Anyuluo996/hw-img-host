@@ -2,12 +2,19 @@ interface KvStore {
   get(key: string, type?: 'text' | 'json' | 'arrayBuffer' | 'stream'): Promise<unknown>
   put(key: string, value: string | ArrayBuffer | ArrayBufferView | ReadableStream): Promise<void>
   delete(key: string): Promise<void>
+  list(options?: {
+    prefix?: string
+    limit?: number
+    cursor?: string
+  }): Promise<{ complete: boolean; cursor: string; keys: Array<{ name: string }> }>
 }
 
 declare let img_kv: KvStore | undefined
 
-const KV_KEY = 'img_kv'
-const MAX_ITEMS = 500
+// 每条记录独立 key 的前缀，配合 list 前缀扫描。用下划线规避冒号字符集风险。
+const KEY_PREFIX = 'img_'
+// 旧版单数组 key（迁移用）
+const LEGACY_KEY = 'img_kv'
 
 function base64UrlToBytes(str: string): Uint8Array {
   let b64 = str.replace(/-/g, '+').replace(/_/g, '/')
@@ -72,34 +79,73 @@ function getKV(): KvStore {
   return img_kv
 }
 
-async function getItems(): Promise<Record<string, unknown>[]> {
-  try {
-    const data = await getKV().get(KV_KEY, 'json')
-    return Array.isArray(data) ? (data as Record<string, unknown>[]) : []
-  } catch (e) {
-    console.error('KV getItems error:', (e as Error).message)
-    return []
-  }
+function genId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
-async function addItem(item: Record<string, unknown>) {
+type RecordItem = Record<string, unknown>
+
+// 列出所有记录：list 前缀扫描翻页拿 key，再批量 get 取值
+async function listItems(): Promise<RecordItem[]> {
   const kv = getKV()
-  const items = await getItems()
-  const newItem = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-    ...item,
-    createdAt: new Date().toISOString(),
+  const allKeys: string[] = []
+  let cursor: string | undefined
+  let result
+  do {
+    result = await kv.list({ prefix: KEY_PREFIX, limit: 256, cursor })
+    for (const k of result.keys) allKeys.push(k.name)
+    cursor = result.complete ? undefined : result.cursor
+  } while (cursor)
+
+  // 并发取值
+  const items = await Promise.all(
+    allKeys.map(async (k) => {
+      try {
+        const v = (await kv.get(k, 'json')) as RecordItem | null
+        return v ? { ...v, _key: k } : null
+      } catch {
+        return null
+      }
+    }),
+  )
+  return items.filter((x): x is RecordItem => x !== null)
+}
+
+// 一次性迁移旧版单数组数据到独立 key 格式。迁移后删除旧 key。
+async function migrateLegacy(): Promise<void> {
+  const kv = getKV()
+  let legacy: unknown
+  try {
+    legacy = await kv.get(LEGACY_KEY, 'json')
+  } catch {
+    return // 旧 key 不存在，无需迁移
   }
-  items.unshift(newItem)
-  if (items.length > MAX_ITEMS) items.length = MAX_ITEMS
-  await kv.put(KV_KEY, JSON.stringify(items))
+  if (!Array.isArray(legacy)) return
+  const arr = legacy as RecordItem[]
+  if (arr.length === 0) {
+    await kv.delete(LEGACY_KEY)
+    return
+  }
+  // 逐条写入独立 key（保留原 id，无则生成）
+  for (const item of arr) {
+    const id = (item.id as string) || genId()
+    const key = KEY_PREFIX + id
+    await kv.put(key, JSON.stringify(item))
+  }
+  await kv.delete(LEGACY_KEY)
+  console.log(`migrated ${arr.length} legacy records`)
+}
+
+async function addItem(item: RecordItem): Promise<RecordItem> {
+  const kv = getKV()
+  const id = (item.id as string) || genId()
+  const newItem = { ...item, id, createdAt: new Date().toISOString() }
+  await kv.put(KEY_PREFIX + id, JSON.stringify(newItem))
   return newItem
 }
 
-async function removeItem(id: string) {
-  const items = await getItems()
-  const filtered = items.filter((r) => (r as { id?: string }).id !== id)
-  await getKV().put(KV_KEY, JSON.stringify(filtered))
+async function removeItem(id: string): Promise<void> {
+  await getKV().delete(KEY_PREFIX + id)
 }
 
 export async function onRequest(context: {
@@ -138,7 +184,15 @@ export async function onRequest(context: {
 
   try {
     if (method === 'GET') {
-      const items = await getItems()
+      // 列表前先尝试迁移旧数据（幂等：迁移完旧 key 被删，下次直接跳过）
+      await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
+      const items = await listItems()
+      // 按创建时间倒序
+      items.sort((a, b) => {
+        const ta = new Date((a.createdAt as string) || 0).getTime()
+        const tb = new Date((b.createdAt as string) || 0).getTime()
+        return tb - ta
+      })
       return jsonRes({ code: 0, msg: 'ok', data: { images: items, total: items.length } })
     }
 

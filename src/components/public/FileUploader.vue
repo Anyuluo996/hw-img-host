@@ -128,6 +128,8 @@ interface UploadInfo {
   thumbnailWidth: number
   thumbnailHeight: number
   thumbnailSize: number
+  // 原始 CNB path，删除文件时需要（形如 /slug/-/imgs/ID/uuid.png）
+  assetsPath?: string
 }
 
 interface CompressResult {
@@ -520,6 +522,7 @@ async function uploadFile(): Promise<void> {
       thumbnailWidth: thumbnailWidth.value,
       thumbnailHeight: thumbnailHeight.value,
       thumbnailSize: thumbnailSize.value,
+      assetsPath: assets.path,
     }
     emit('update:uploadInfo', uploadInfo)
 

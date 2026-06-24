@@ -92,7 +92,13 @@ async function listItems(): Promise<RecordItem[]> {
   let cursor: string | undefined
   let result
   do {
-    result = await kv.list({ prefix: KEY_PREFIX, limit: 256, cursor })
+    // cursor 必须是字符串，首次不传（undefined 会导致 "cursor type invalid"）
+    const opts: { prefix: string; limit: number; cursor?: string } = {
+      prefix: KEY_PREFIX,
+      limit: 256,
+    }
+    if (cursor) opts.cursor = cursor
+    result = await kv.list(opts)
     for (const k of result.keys) allKeys.push(k.name)
     cursor = result.complete ? undefined : result.cursor
   } while (cursor)

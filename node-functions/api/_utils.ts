@@ -1,6 +1,57 @@
 // 上传类型：图片走 imgs（TOKEN_IMG），任意文件走 files（TOKEN_FILE，需 repo-notes:rw scope）
 type UploadType = 'imgs' | 'files'
 
+import { createHash } from 'node:crypto'
+import jwt from 'jsonwebtoken'
+
+// 算文件 buffer 的 SHA-256（用于查重，和前端 Web Crypto 结果一致）
+function computeSHA256(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex')
+}
+
+// 后端查重：签一个短期 JWT → HTTP 调边缘函数 /kv-api/check → 返回命中记录或 null。
+// 这样 node-functions 复用边缘函数的 KV 查重能力，前端/API 直传都拦得住。
+async function checkDuplicateByHash(
+  hash: string,
+): Promise<{ url: string; urlOriginal?: string; thumbnailUrl?: string; assetsPath?: string; tags?: string[] } | null> {
+  const baseUrl = process.env.BASE_IMG_URL?.replace(/\/$/, '') || ''
+  const uploadPassword = process.env.UPLOAD_PASSWORD
+  if (!baseUrl || !uploadPassword) return null // 未配置则跳过查重，不阻塞上传
+  try {
+    // 服务端自签 JWT（与 auth.ts 同算法），免登录调边缘函数
+    const token = jwt.sign({}, uploadPassword, { expiresIn: '5m' })
+    const url = new URL(`${baseUrl}/kv-api/check`)
+    url.searchParams.set('hash', hash)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000)
+    try {
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      const data = (await resp.json()) as {
+        code: number
+        data?: { exists: boolean; record?: Record<string, unknown> }
+      }
+      if (data.code === 0 && data.data?.exists && data.data.record) {
+        const r = data.data.record
+        return {
+          url: String(r.url || ''),
+          urlOriginal: r.urlOriginal ? String(r.urlOriginal) : undefined,
+          thumbnailUrl: r.thumbnailUrl ? String(r.thumbnailUrl) : undefined,
+          assetsPath: r.assetsPath ? String(r.assetsPath) : undefined,
+          tags: Array.isArray(r.tags) ? (r.tags as string[]) : undefined,
+        }
+      }
+      return null
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  } catch {
+    return null // 查重失败不阻塞上传
+  }
+}
+
 // 图片扩展名白名单。命中则走 imgs 端点（CNB 内容嗅探只接受真图片），
 // 其余一律走 files 端点。
 const IMAGE_EXTS = new Set([
@@ -178,5 +229,7 @@ export {
   buildImageUrl,
   buildAccessUrl,
   detectUploadType,
+  computeSHA256,
+  checkDuplicateByHash,
 }
 export type { UploadType }

@@ -29,9 +29,14 @@ function removeTag(t: string) {
   tags.value = tags.value.filter((x) => x !== t)
 }
 
-// 保存到画廊（带上 tag）
+// 保存到画廊（带上 tag）。重复文件复用链接，不再写入索引避免重复记录。
 function saveToGallery() {
   if (!uploadInfo.value) return
+  if (uploadInfo.value.duplicate) {
+    toast.info('该文件已存在，链接已复用，无需重复保存')
+    gallerySaved.value = true
+    return
+  }
   gallerySaved.value = true
   fetch('/kv-api', {
     method: 'POST',
@@ -64,6 +69,8 @@ const uploadInfo = ref<{
   thumbnailSize: number
   assetsPath?: string
   tags?: string[]
+  hash?: string
+  duplicate?: boolean
 } | null>(null)
 
 // 上传后重置 tag 状态（等用户在上传完成区填 tag 再保存）
@@ -134,8 +141,12 @@ watch(uploadInfo, (val) => {
           v-if="uploadInfo"
           class="mt-6 w-full max-w-md overflow-hidden rounded-xl border border-border/50 bg-card"
         >
-          <div class="px-5 py-3.5">
+          <div class="flex items-center gap-2 px-5 py-3.5">
             <span class="text-xs font-medium text-muted-foreground">上传完成</span>
+            <span
+              v-if="uploadInfo.duplicate"
+              class="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400"
+            >已存在·复用</span>
           </div>
           <div class="space-y-0.5 border-t border-border/30 px-5 py-3.5">
             <div class="flex items-baseline gap-2 py-1.5">
@@ -180,8 +191,16 @@ watch(uploadInfo, (val) => {
             </div>
           </div>
 
-          <!-- tag 输入 + 保存到画廊 -->
-          <div class="space-y-2.5 border-t border-border/30 px-5 py-3.5">
+          <!-- 复用提示（duplicate 时）-->
+          <div
+            v-if="uploadInfo.duplicate"
+            class="border-t border-border/30 px-5 py-3 text-center text-xs text-muted-foreground"
+          >
+            该文件已存在，已复用链接，无需重复保存
+          </div>
+
+          <!-- tag 输入 + 保存到画廊（非 duplicate）-->
+          <div v-else class="space-y-2.5 border-t border-border/30 px-5 py-3.5">
             <div class="flex items-center gap-2">
               <span class="w-17 shrink-0 text-xs text-muted-foreground/70">标签</span>
               <div class="flex flex-wrap items-center gap-1.5">

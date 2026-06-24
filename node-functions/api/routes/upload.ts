@@ -1,6 +1,13 @@
 import { Router } from 'express'
 import multer from 'multer'
-import { uploadToCnb, signUpload, buildAccessUrl, getErrorDetail } from '../_utils'
+import {
+  uploadToCnb,
+  signUpload,
+  buildAccessUrl,
+  getErrorDetail,
+  computeSHA256,
+  checkDuplicateByHash,
+} from '../_utils'
 import { reply } from '../_reply'
 import { authMiddleware } from '../_auth'
 
@@ -61,6 +68,25 @@ router.post(
       const thumbnailFile = files.thumbnail?.[0]
       const baseUrl = process.env.BASE_IMG_URL!
 
+      // 服务端查重：算原始文件哈希，命中则直接返回已有链接（不重复上传到 CNB）。
+      // 这是真正的拦截点，前端/API 直传都会经过这里，无法绕过。
+      const fileHash = computeSHA256(mainFile.buffer)
+      const existing = await checkDuplicateByHash(fileHash)
+      if (existing) {
+        return res.json(
+          reply(0, '文件已存在，复用已有链接', {
+            url: existing.url,
+            thumbnailUrl: existing.thumbnailUrl ?? null,
+            assets: { path: existing.assetsPath || '', hash: fileHash },
+            thumbnailAssets: null,
+            type: 'imgs',
+            hasThumbnail: !!existing.thumbnailUrl,
+            hash: fileHash,
+            duplicate: true,
+          }),
+        )
+      }
+
       // type 由文件名自动判断，图片走 imgs，非图片走 files
       const mainResult = await uploadToCnb({
         fileBuffer: mainFile.buffer,
@@ -89,6 +115,7 @@ router.post(
           thumbnailAssets: thumbnailResult?.assets ?? null,
           type: mainResult.type,
           hasThumbnail: !!thumbnailFile,
+          hash: fileHash,
         }),
       )
     } catch (err: unknown) {

@@ -132,6 +132,10 @@ interface UploadInfo {
   assetsPath?: string
   // 标签数组，随机图检索用
   tags?: string[]
+  // 原始文件 SHA-256，查重用
+  hash?: string
+  // 是否为重复命中复用（true 表示未实际上传）
+  duplicate?: boolean
 }
 
 interface CompressResult {
@@ -155,10 +159,12 @@ interface UploadResponse {
   data: {
     url: string // 已含完整 origin 的代理链接
     thumbnailUrl: string | null
-    assets: { path: string }
+    assets: { path: string; hash?: string }
     thumbnailAssets: { path: string } | null
     type?: 'imgs' | 'files'
     hasThumbnail: boolean
+    hash?: string // 服务端算的文件哈希
+    duplicate?: boolean // 是否为后端命中重复复用
   }
 }
 
@@ -203,6 +209,9 @@ const compressionRatio = ref<number>(0)
 const imageWidth = ref<number>(0)
 const imageHeight = ref<number>(0)
 const isImage = ref<boolean>(true)
+const fileHash = ref<string>('') // 原始文件 SHA-256，上传时带上用于查重
+const isDuplicate = ref<boolean>(false) // 是否命中重复（命中则直接复用链接，不上传）
+const duplicateRecord = ref<Record<string, unknown> | null>(null) // 命中时复用的已有记录
 
 let qualityDebounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(
@@ -410,6 +419,37 @@ function onDrop(e: DragEvent): void {
   }
 }
 
+// 计算原始文件 SHA-256（浏览器原生 Web Crypto API，无依赖）
+async function computeSHA256(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer()
+  const digest = await crypto.subtle.digest('SHA-256', buffer)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+// 查重：用原始文件哈希问后端是否已存在。命中返回该记录（含链接），未命中返回 null。
+interface CheckResponse {
+  code: number
+  msg?: string
+  data?: { exists: boolean; record?: Record<string, unknown> }
+}
+async function checkDuplicate(hash: string): Promise<Record<string, unknown> | null> {
+  const token = localStorage.getItem('hw_img_host_token')
+  try {
+    const res = await axios.get<CheckResponse>('/kv-api/check', {
+      params: { hash },
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (res.data.code === 0 && res.data.data?.exists && res.data.data.record) {
+      return res.data.data.record
+    }
+    return null
+  } catch {
+    return null // 查重失败不阻塞上传
+  }
+}
+
 async function handleFile(f: File | null): Promise<void> {
   if (!f) {
     file.value = null
@@ -428,6 +468,29 @@ async function handleFile(f: File | null): Promise<void> {
     }
     originalFile.value = f
     isImage.value = isImageFile(f.name)
+    isDuplicate.value = false
+    fileHash.value = ''
+
+    // 查重：算原始文件 SHA-256 → 问后端是否已存在。命中则直接复用，不压缩不上传。
+    const hash = await computeSHA256(f)
+    fileHash.value = hash
+    const existing = await checkDuplicate(hash)
+    if (existing) {
+      isDuplicate.value = true
+      // 复用已存在记录的链接，不再压缩/上传
+      file.value = f
+      compressionRatio.value = 0
+      imageWidth.value = Number(existing.width || 0)
+      imageHeight.value = Number(existing.height || 0)
+      thumbnailFile.value = null
+      thumbnailPreview.value = ''
+      // 预存复用信息，uploadFile 直接用
+      duplicateRecord.value = existing
+      errorMsg.value = ''
+      uploadedUrl.value = ''
+      uploadedThumbnailUrl.value = ''
+      return
+    }
 
     if (isImage.value) {
       // 图片：走原有的 canvas 压缩 + 缩略图流程
@@ -477,6 +540,38 @@ async function uploadFile(): Promise<void> {
     return
   }
   try {
+    // 命中重复：直接复用已有记录的链接，不重新上传
+    if (isDuplicate.value && duplicateRecord.value) {
+      const rec = duplicateRecord.value
+      const proxyUrl = String(rec.url || '')
+      uploadedUrl.value = proxyUrl
+      const uploadInfo: UploadInfo = {
+        url: proxyUrl,
+        urlOriginal: rec.urlOriginal ? String(rec.urlOriginal) : undefined,
+        thumbnailUrl: rec.thumbnailUrl ? String(rec.thumbnailUrl) : undefined,
+        thumbnailOriginalUrl: rec.thumbnailOriginalUrl
+          ? String(rec.thumbnailOriginalUrl)
+          : undefined,
+        name: file.value.name,
+        size: file.value.size,
+        type: file.value.type,
+        compressionRatio: 0,
+        width: imageWidth.value,
+        height: imageHeight.value,
+        hasThumbnail: false,
+        thumbnailWidth: 0,
+        thumbnailHeight: 0,
+        thumbnailSize: 0,
+        assetsPath: rec.assetsPath ? String(rec.assetsPath) : undefined,
+        tags: Array.isArray(rec.tags) ? (rec.tags as string[]) : [],
+        hash: fileHash.value,
+        duplicate: true,
+      }
+      emit('update:uploadInfo', uploadInfo)
+      toast.success('该文件已上传过，已复用链接')
+      return
+    }
+
     uploading.value = true
     uploadProgress.value = 0
 
@@ -501,8 +596,16 @@ async function uploadFile(): Promise<void> {
       throw new Error(uploadRes.data.msg || '上传失败')
     }
 
-    const { url: proxyUrl, assets, thumbnailUrl: thumbProxyUrl, thumbnailAssets } =
-      uploadRes.data.data
+    const {
+      url: proxyUrl,
+      assets,
+      thumbnailUrl: thumbProxyUrl,
+      thumbnailAssets,
+      hash: serverHash,
+      duplicate: serverDup,
+    } = uploadRes.data.data
+    // 后端算的哈希更权威，优先用
+    if (serverHash) fileHash.value = serverHash
     const originUrl = 'https://cnb.cool' + assets.path
     const thumbOriginUrl = thumbnailAssets ? 'https://cnb.cool' + thumbnailAssets.path : undefined
 
@@ -525,10 +628,13 @@ async function uploadFile(): Promise<void> {
       thumbnailHeight: thumbnailHeight.value,
       thumbnailSize: thumbnailSize.value,
       assetsPath: assets.path,
+      tags: [],
+      hash: fileHash.value,
+      duplicate: !!serverDup,
     }
     emit('update:uploadInfo', uploadInfo)
 
-    toast.success('上传成功')
+    toast.success(serverDup ? '该文件已存在，复用已有链接' : '上传成功')
   } catch (err) {
     console.error(err)
     const error = err as {

@@ -203,6 +203,13 @@ async function removeItem(id: string): Promise<void> {
   await getKV().delete(KEY_PREFIX + id)
 }
 
+// 按文件哈希查重：list 全量扫描，返回命中记录或 null。
+// 用于上传前避免重复：前端算好原始文件 hash，命中则直接复用链接。
+async function findByHash(hash: string): Promise<RecordItem | null> {
+  const items = await listItems()
+  return items.find((it) => String(it.hash || '') === hash) || null
+}
+
 export async function onRequest(context: {
   request: Request
   env: Record<string, string | undefined>
@@ -239,6 +246,18 @@ export async function onRequest(context: {
 
   try {
     if (method === 'GET') {
+      // 子路由 GET /kv-api/check?hash=xxx — 按文件哈希查重
+      const firstSeg = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      if (firstSeg === 'check') {
+        const url = new URL(context.request.url)
+        const hash = (url.searchParams.get('hash') || '').trim()
+        if (!hash) {
+          return jsonRes({ code: 1, msg: '缺少 hash 参数' }, 400)
+        }
+        const hit = await findByHash(hash)
+        return jsonRes({ code: 0, msg: 'ok', data: { exists: !!hit, record: hit } })
+      }
+
       // 列表前先尝试迁移旧数据（幂等：迁移完旧 key 被删，下次直接跳过）
       await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
       const items = await listItems()

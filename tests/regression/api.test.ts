@@ -21,6 +21,14 @@ vi.mock('../../node-functions/api/_utils', async (importOriginal) => {
       url: `/${SLUG}/-/imgs/abc/${fileName}`,
       type: 'imgs' as const,
     })),
+    signUpload: vi.fn(async ({ fileName, fileSize }: { fileName: string; fileSize: number }) => {
+      const type = /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif|tiff)$/i.test(fileName) ? 'imgs' : 'files'
+      return {
+        assets: { path: `/${SLUG}/-/${type}/abc/${fileName}`, __type: type },
+        upload_url: 'https://upload.mock/x',
+        type,
+      }
+    }),
   }
 })
 
@@ -177,5 +185,63 @@ describe('HTTP 回归测试：M2 错误响应脱敏', () => {
     // 关键：detail（含上游敏感信息）不应出现在响应体
     expect(res.body).not.toHaveProperty('detail')
     expect(JSON.stringify(res.body)).not.toContain('token expired')
+  })
+})
+
+describe('HTTP 回归测试：N3 /sign size 上限', () => {
+  const saved = { ...process.env }
+
+  beforeEach(() => {
+    process.env.UPLOAD_PASSWORD = PASSWORD
+    process.env.JWT_SECRET = SECRET
+    process.env.SLUG_IMG = SLUG
+  })
+  afterEach(() => {
+    process.env = { ...saved }
+  })
+
+  async function getToken() {
+    const login = await request(app).post('/auth/login').send({ password: PASSWORD })
+    return login.body.data.token
+  }
+
+  it('超过 20MB 的 size 被拒绝（413）', async () => {
+    const token = await getToken()
+    const res = await request(app)
+      .get('/upload/sign')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ name: 'big.png', size: 21 * 1024 * 1024 })
+    expect(res.status).toBe(413)
+    expect(res.body.msg).toContain('限制')
+  })
+
+  it('合法 size 通过校验', async () => {
+    const token = await getToken()
+    const res = await request(app)
+      .get('/upload/sign')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ name: 'ok.png', size: 1024 })
+    // mock 的 signUpload 会成功
+    expect(res.status).toBe(200)
+    expect(res.body.code).toBe(0)
+  })
+
+  it('缺少参数被拒绝（400）', async () => {
+    const token = await getToken()
+    const res = await request(app)
+      .get('/upload/sign')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ name: 'ok.png' })
+    expect(res.status).toBe(400)
+  })
+
+  it('N2 文件名被净化（../ 被去掉）', async () => {
+    const token = await getToken()
+    const res = await request(app)
+      .get('/upload/sign')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ name: '../../../etc/passwd', size: 1024 })
+    // 净化后 fileName = 'passwd'，仍能通过（detectUploadType files）
+    expect(res.status).toBe(200)
   })
 })

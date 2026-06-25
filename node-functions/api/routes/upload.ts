@@ -10,22 +10,27 @@ import {
 } from '../_utils'
 import { reply } from '../_reply'
 import { authMiddleware } from '../_auth'
+import { sanitizeFileName, MAX_FILE_SIZE } from '../_validation'
 
 const router = Router()
 
 const upload = multer({
   limits: {
-    fileSize: 20 * 1024 * 1024,
-    fieldSize: 20 * 1024 * 1024,
+    fileSize: MAX_FILE_SIZE,
+    fieldSize: MAX_FILE_SIZE,
   },
 })
 
 router.get('/sign', authMiddleware, async (req, res) => {
   try {
-    const fileName = req.query.name as string
+    const fileName = sanitizeFileName(req.query.name as string)
     const fileSize = parseInt(req.query.size as string, 10)
     if (!fileName || !fileSize) {
       return res.status(400).json(reply(1, '缺少 name 或 size 参数'))
+    }
+    // N3: 与 multer 实际上传上限一致，防止申请超大上传签名耗尽配额
+    if (fileSize > MAX_FILE_SIZE) {
+      return res.status(413).json(reply(1, `文件超出 ${MAX_FILE_SIZE / 1024 / 1024}MB 限制`))
     }
 
     // type 由文件名自动判断：图片走 imgs，其余走 files（见 _utils.detectUploadType）
@@ -89,9 +94,10 @@ router.post(
       }
 
       // type 由文件名自动判断，图片走 imgs，非图片走 files
+      // N2: 净化文件名，防止 ../ 路径穿越和控制字符注入 CNB 存储
       const mainResult = await uploadToCnb({
         fileBuffer: mainFile.buffer,
-        fileName: mainFile.originalname,
+        fileName: sanitizeFileName(mainFile.originalname),
       })
 
       let thumbnailResult: {
@@ -102,7 +108,7 @@ router.post(
       if (thumbnailFile) {
         thumbnailResult = await uploadToCnb({
           fileBuffer: thumbnailFile.buffer,
-          fileName: thumbnailFile.originalname,
+          fileName: sanitizeFileName(thumbnailFile.originalname),
         })
       }
 

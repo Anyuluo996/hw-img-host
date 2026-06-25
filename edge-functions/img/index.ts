@@ -1,3 +1,5 @@
+import { isAllowedImageHost } from '../_security'
+
 interface KvStore {
   get(key: string, type?: 'text' | 'json' | 'arrayBuffer' | 'stream'): Promise<unknown>
   put(key: string, value: string | ArrayBuffer | ArrayBufferView | ReadableStream): Promise<void>
@@ -181,6 +183,12 @@ export async function onRequest(context: {
     // 优先用 CNB 原始直链（o），避免边缘函数回调自己的 /img-api 代理
     const target = pick.o || pick.u
 
+    // N1 SSRF 防护：只允许 fetch CNB 存储域名，禁止内网/云元数据端点
+    const ALLOWED_HOSTS = ['cnb.cool', 'cnb-img.cool']
+    if (!isAllowedImageHost(target, ALLOWED_HOSTS)) {
+      return jsonRes({ code: 1, msg: '非法图片来源' }, 403)
+    }
+
     const imgResp = await fetch(target, {
       headers: {
         'User-Agent':
@@ -188,10 +196,8 @@ export async function onRequest(context: {
       },
     })
     if (!imgResp.ok) {
-      return jsonRes(
-        { code: 1, msg: `获取图片失败: ${imgResp.status}`, target },
-        502,
-      )
+      // N6 脱敏：不回传 target（含内部存储路径结构），只返回通用错误
+      return jsonRes({ code: 1, msg: '获取图片失败' }, 502)
     }
     const contentType = imgResp.headers.get('Content-Type') || 'image/jpeg'
 

@@ -15,6 +15,11 @@ declare let img_kv: KvStore | undefined
 const KEY_PREFIX = 'img_'
 // 旧版单数组 key（迁移用）
 const LEGACY_KEY = 'img_kv'
+// 单 key 聚合索引：存全部记录的数组。图库/查重/列表都用它（实测 1 次 get ~4ms，
+// 远快于 list翻页 + get×N 的 ~1.5s）。每条独立 key 仍保留为可信数据源 + 重建依据。
+const INDEX_KEY = 'idx_all'
+// 标记 idx_all 是否已初始化过（区分「空库，已建索引」和「从未建过索引需迁移」）。
+const INDEX_INIT_KEY = 'idx_init'
 
 function base64UrlToBytes(str: string): Uint8Array {
   let b64 = str.replace(/-/g, '+').replace(/_/g, '/')
@@ -146,6 +151,44 @@ async function listItems(): Promise<RecordItem[]> {
   return items.filter((x): x is RecordItem => x !== null)
 }
 
+// ===== 单 key 聚合索引（idx_all）=====
+// 一次 get 拿到全部记录，图库列表/查重都走这里（~4ms）。
+// 写操作（增删改）会增量维护这个索引，保证一致性。
+async function getIndex(): Promise<RecordItem[]> {
+  try {
+    const v = (await getKV().get(INDEX_KEY, 'json')) as RecordItem[] | null
+    return Array.isArray(v) ? v : []
+  } catch {
+    return []
+  }
+}
+
+async function setIndex(items: RecordItem[]): Promise<void> {
+  const kv = getKV()
+  await kv.put(INDEX_KEY, JSON.stringify(items))
+  // 标记已初始化，空库写 [] 后也不算「未迁移」
+  await kv.put(INDEX_INIT_KEY, '1')
+}
+
+// idx_all 是否已初始化（区分「空库已建索引」和「从未建过需迁移」，
+// 避免空库每次 GET 都误触发全量 list 重建）
+async function isIndexInitialized(): Promise<boolean> {
+  try {
+    return (await getKV().get(INDEX_INIT_KEY, 'text')) === '1'
+  } catch {
+    return false
+  }
+}
+
+// 一次性迁移：从每条独立 key 重建 idx_all 聚合索引。
+// 存量数据首次切到单 key 方案时调用，之后写操作会增量维护，无需再跑。
+async function rebuildIndex(): Promise<{ total: number }> {
+  await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
+  const items = await listItems()
+  await setIndex(items) // setIndex 内会标记 idx_init=1
+  return { total: items.length }
+}
+
 // 一次性迁移旧版单数组数据到独立 key 格式。迁移后删除旧 key。
 async function migrateLegacy(): Promise<void> {
   const kv = getKV()
@@ -197,7 +240,12 @@ async function addItem(item: RecordItem): Promise<RecordItem> {
   const kv = getKV()
   const id = (item.id as string) || genId()
   const newItem = { ...item, id, createdAt: new Date().toISOString() }
+  // 写每条独立 key（可信数据源）
   await kv.put(KEY_PREFIX + id, JSON.stringify(newItem))
+  // 增量维护 idx_all 聚合索引（图库列表走它，1次get ~4ms）
+  const index = await getIndex()
+  index.push(newItem)
+  await setIndex(index)
   // 维护 tag 桶索引，加速随机图端点
   if (newItem.url) {
     await addToTagBuckets(String(newItem.url), newItem.urlOriginal, newItem.tags).catch(() => {})
@@ -221,7 +269,15 @@ async function updateItem(id: string, patch: RecordItem): Promise<RecordItem | n
   const old = await getItem(id)
   if (!old) return null
   const updated = { ...old, ...patch, id }
+  // 写每条独立 key
   await kv.put(KEY_PREFIX + id, JSON.stringify(updated))
+  // 同步更新 idx_all 里对应记录
+  const index = await getIndex()
+  const i = index.findIndex((it) => it.id === id)
+  if (i >= 0) {
+    index[i] = { ...index[i], ...updated }
+    await setIndex(index)
+  }
   return updated
 }
 
@@ -250,17 +306,27 @@ async function rebuildBuckets(): Promise<{ buckets: number; total: number }> {
     await kv.put('tag_' + tag, JSON.stringify(entries))
     count++
   }
+  // 顺带刷新聚合索引（全量重建，保证一致）
+  await setIndex(items)
   return { buckets: count, total: items.length }
 }
 
 async function removeItem(id: string): Promise<void> {
-  await getKV().delete(KEY_PREFIX + id)
+  const kv = getKV()
+  // 删每条独立 key
+  await kv.delete(KEY_PREFIX + id)
+  // 同步从 idx_all 移除
+  const index = await getIndex()
+  const next = index.filter((it) => it.id !== id)
+  if (next.length !== index.length) {
+    await setIndex(next)
+  }
 }
 
-// 按文件哈希查重：list 全量扫描，返回命中记录或 null。
+// 按文件哈希查重：读 idx_all 聚合索引（1次get），返回命中记录或 null。
 // 用于上传前避免重复：前端算好原始文件 hash，命中则直接复用链接。
 async function findByHash(hash: string): Promise<RecordItem | null> {
-  const items = await listItems()
+  const items = await getIndex()
   return items.find((it) => String(it.hash || '') === hash) || null
 }
 
@@ -312,48 +378,15 @@ export async function onRequest(context: {
         return jsonRes({ code: 0, msg: 'ok', data: { exists: !!hit, record: hit } })
       }
 
-      // 子路由 GET /kv-api/_bench — 性能对比基准（临时调试用）
-      // 对比三种读法：当前 list+get×N、单大 value get、tag桶 get
-      if (firstSeg === '_bench') {
-        const kv = getKV()
-        const result: Record<string, unknown> = {}
-
-        // 1. 当前方案：list 翻页 + 并发 get
-        const t1 = Date.now()
-        const items = await listItems()
-        result['list_get_all'] = { ms: Date.now() - t1, count: items.length }
-
-        // 2. 单大 value：读「全部」tag桶（一个 JSON 数组 value，~? KB）
-        const t2 = Date.now()
-        let bucketSize = 0
-        try {
-          const all = (await kv.get('tag__all', 'json')) as Array<unknown> | null
-          bucketSize = Array.isArray(all) ? all.length : 0
-        } catch {}
-        result['single_bucket_get'] = { ms: Date.now() - t2, count: bucketSize }
-
-        // 3. 纯 list（只翻页拿 key 名，不 get 值）
-        const t3 = Date.now()
-        const allKeys: string[] = []
-        let cursor: string | undefined
-        let guard = 0
-        do {
-          if (guard++ > 50) break
-          const opts: { prefix: string; limit: number; cursor?: string } = { prefix: KEY_PREFIX, limit: 256 }
-          if (cursor) opts.cursor = cursor
-          const r = await kv.list(opts)
-          const parsed = extractKeys(r)
-          allKeys.push(...parsed.names)
-          cursor = parsed.complete ? undefined : parsed.cursor
-        } while (cursor)
-        result['list_keys_only'] = { ms: Date.now() - t3, count: allKeys.length }
-
-        return jsonRes({ code: 0, msg: 'ok', data: result })
+      // 列表：优先读单 key 聚合索引 idx_all（1次get ~4ms）。
+      // 首次切到本方案时 idx_init 不存在 → 自动重建一次（幂等），之后写操作增量维护。
+      let items = await getIndex()
+      const initialized = await isIndexInitialized()
+      if (!initialized) {
+        // 聚合索引从未建过：从每条独立 key 重建一次（存量迁移）
+        await rebuildIndex()
+        items = await getIndex()
       }
-
-      // 列表前先尝试迁移旧数据（幂等：迁移完旧 key 被删，下次直接跳过）
-      await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
-      const items = await listItems()
       // 按创建时间倒序
       items.sort((a, b) => {
         const ta = new Date((a.createdAt as string) || 0).getTime()
@@ -365,8 +398,13 @@ export async function onRequest(context: {
 
     if (method === 'POST') {
       const body = (await context.request.json()) as Record<string, unknown>
-      // 子路由 POST /kv-api/rebuild-buckets — 一次性构建 tag 桶索引
       const firstSeg = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      // 子路由 POST /kv-api/rebuild-idx — 从每条独立 key 重建 idx_all 聚合索引
+      if (firstSeg === 'rebuild-idx') {
+        const result = await rebuildIndex()
+        return jsonRes({ code: 0, msg: '聚合索引重建完成', data: result })
+      }
+      // 子路由 POST /kv-api/rebuild-buckets — 一次性构建 tag 桶索引（顺带刷新 idx_all）
       if (firstSeg === 'rebuild-buckets') {
         const result = await rebuildBuckets()
         return jsonRes({ code: 0, msg: '桶索引重建完成', data: result })

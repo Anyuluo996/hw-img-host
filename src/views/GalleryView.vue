@@ -1,37 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Image, Copy, Check, ExternalLink, ArrowLeft, Loader2, Trash2, Search, Tag } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from 'vue-sonner'
+import { useGalleryCache, type ImageRecord } from '@/composables/useGalleryCache'
 
 const router = useRouter()
-
-interface ImageRecord {
-  id: string
-  url: string
-  thumbnailUrl?: string
-  urlOriginal?: string
-  thumbnailOriginalUrl?: string
-  name: string
-  size: number
-  type: string
-  width: number
-  height: number
-  hasThumbnail: boolean
-  thumbnailWidth: number
-  thumbnailHeight: number
-  thumbnailSize: number
-  compressionRatio: number
-  createdAt: string
-  // 删除所需：原始 CNB path（形如 /slug/-/imgs/ID/uuid.png）
-  assetsPath?: string
-  // 标签数组
-  tags?: string[]
-  // 旧记录可能没有，兼容字段
-  _key?: string
-}
+const { readCache, writeCache, bumpVersion } = useGalleryCache()
 
 interface ListResponse {
   code: number
@@ -144,6 +121,9 @@ async function saveEditTags(img: ImageRecord) {
     }
     // 本地更新
     img.tags = tags
+    // 同步缓存 + 打脏版本号（tag 变更影响 /img 随机端点的桶，也通知其他标签页）
+    writeCache(images.value)
+    bumpVersion()
     toast.success('标签已更新')
     editingId.value = ''
   } catch {
@@ -206,22 +186,27 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-async function fetchImages() {
-  loading.value = true
+// 加载图库列表。
+// silent=true 时不显示 loading（用于后台刷新：已先用缓存秒显，再静默拉最新数据）。
+async function fetchImages(silent = false) {
+  if (!silent) loading.value = true
   error.value = ''
   try {
     const res = await fetch('/kv-api', { headers: authHeaders() })
     const json: ListResponse = await res.json()
     if (json.code !== 0) {
-      error.value = json.msg || '加载失败'
+      // 后台刷新失败时不清空已有缓存数据，只在首次加载时报错
+      if (!silent) error.value = json.msg || '加载失败'
       return
     }
     images.value = json.data.images
     total.value = json.data.total
+    // 写入缓存供下次秒开
+    writeCache(json.data.images)
   } catch {
-    error.value = '网络请求失败'
+    if (!silent) error.value = '网络请求失败'
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -256,6 +241,9 @@ async function deleteOne(img: ImageRecord) {
     // 本地移除
     images.value = images.value.filter((i) => i.id !== img.id)
     total.value = images.value.length
+    // 同步缓存 + 打脏版本号（通知其他标签页/上传页）
+    writeCache(images.value)
+    bumpVersion()
   } catch {
     toast.error('删除失败')
   } finally {
@@ -291,6 +279,9 @@ async function deleteSelected() {
   // 本地移除已删的
   images.value = images.value.filter((i) => !selectedIds.value.has(i.id))
   total.value = images.value.length
+  // 同步缓存 + 打脏版本号
+  writeCache(images.value)
+  bumpVersion()
   selectedIds.value = new Set()
   selectMode.value = false
   if (cnbFail > 0) {
@@ -301,8 +292,35 @@ async function deleteSelected() {
   deleting.value = false
 }
 
+// 监听跨标签页缓存失效（HomeView 在另一标签上传后通过 storage 事件通知）
+function onStorageChange(e: StorageEvent) {
+  if (e.key === 'hw_gallery_version') {
+    fetchImages(true)
+  }
+}
+// 同标签页缓存失效（HomeView 上传 → 自定义事件，storage 事件不触发本标签）
+function onCacheInvalidated() {
+  fetchImages(true)
+}
+
 onMounted(() => {
-  fetchImages()
+  // 先读缓存秒显（loading=false 不转圈），再后台静默拉最新数据对齐
+  const cached = readCache()
+  if (cached && cached.length > 0) {
+    images.value = cached
+    total.value = cached.length
+    loading.value = false
+    fetchImages(true)
+  } else {
+    fetchImages()
+  }
+  window.addEventListener('storage', onStorageChange)
+  window.addEventListener('gallery-cache-invalidated', onCacheInvalidated)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('storage', onStorageChange)
+  window.removeEventListener('gallery-cache-invalidated', onCacheInvalidated)
 })
 </script>
 

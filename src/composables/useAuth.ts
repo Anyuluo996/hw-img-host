@@ -39,8 +39,6 @@ async function login(password: string): Promise<void> {
 function logout() {
   token.value = null
   localStorage.removeItem(TOKEN_KEY)
-  // 清除图库缓存，避免泄露给下一个登录的用户
-  localStorage.removeItem('hw_gallery_cache')
 }
 
 export function getToken(): string | null {

@@ -6,9 +6,6 @@ import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { toast } from 'vue-sonner'
-import { useGalleryCache } from '@/composables/useGalleryCache'
-
-const { bumpVersion } = useGalleryCache()
 
 const quality = ref(0.7)
 const generateThumbnail = ref(false)
@@ -51,11 +48,7 @@ function saveToGallery() {
     },
     body: JSON.stringify({ ...uploadInfo.value, tags: tags.value }),
   })
-    .then(() => {
-      toast.success('已保存到画廊')
-      // 通知图库缓存失效：下次打开图库会重新拉取，本标签页若开着图库也会静默刷新
-      bumpVersion()
-    })
+    .then(() => toast.success('已保存到画廊'))
     .catch(() => toast.error('保存到画廊失败'))
 }
 

@@ -21,22 +21,13 @@ const INDEX_KEY = 'idx_all'
 // 标记 idx_all 是否已初始化过（区分「空库，已建索引」和「从未建过索引需迁移」）。
 const INDEX_INIT_KEY = 'idx_init'
 
-function base64UrlToBytes(str: string): Uint8Array {
-  let b64 = str.replace(/-/g, '+').replace(/_/g, '/')
-  while (b64.length % 4) b64 += '='
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes
-}
-
-function base64UrlDecode(str: string): string {
-  let b64 = str.replace(/-/g, '+').replace(/_/g, '/')
-  while (b64.length % 4) b64 += '='
-  return atob(b64)
-}
+import {
+  extractKeys,
+  pickOrigin as pickOriginPure,
+  base64UrlDecode,
+  base64UrlToBytes,
+  genId,
+} from './_helpers'
 
 async function verifyToken(token: string, secret: string): Promise<boolean> {
   try {
@@ -67,14 +58,17 @@ async function verifyToken(token: string, secret: string): Promise<boolean> {
   }
 }
 
-function jsonRes(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    },
-  })
+// CORS：kv-api 是管理/写端点，收紧到白名单域名（M3），避免任意站点用 token 调用。
+// 从请求里取 Origin，交给纯函数 pickOriginPure 判断。
+function pickOrigin(req: Request, env: Record<string, string | undefined>): string | null {
+  return pickOriginPure(req.headers.get('Origin'), env)
+}
+
+// jsonRes 默认收紧 CORS（只对白名单 Origin 放开）。调用方传 req + env 才能下发 Origin。
+function jsonRes(data: unknown, status = 200, corsOrigin?: string | null): Response {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (corsOrigin) headers['Access-Control-Allow-Origin'] = corsOrigin
+  return new Response(JSON.stringify(data), { status, headers })
 }
 
 function getKV(): KvStore {
@@ -84,38 +78,7 @@ function getKV(): KvStore {
   return img_kv
 }
 
-function genId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-}
-
 type RecordItem = Record<string, unknown>
-
-// 从 kv.list() 的返回值里稳健地提取 key 列表。
-// EdgeOne 实际返回 { complete, cursor, keys:[{key, expiration, meta}] }，
-// 注意 key 对象的字段名是 `key`（不是文档说的 `name`）。这里兼容两者。
-function extractKeys(result: unknown): { names: string[]; complete: boolean; cursor?: string } {
-  if (!result) return { names: [], complete: true }
-  // 情况1: { keys: [...] }
-  if (Array.isArray((result as { keys?: unknown }).keys)) {
-    const r = result as { keys: unknown[]; complete?: boolean; cursor?: string }
-    const names = r.keys.map((k) => {
-      if (typeof k === 'string') return k
-      const obj = k as { key?: string; name?: string }
-      return obj.key || obj.name || ''
-    })
-    return { names: names.filter(Boolean), complete: r.complete !== false, cursor: r.cursor }
-  }
-  // 情况2: 直接是数组
-  if (Array.isArray(result)) {
-    const names = result.map((k) => {
-      if (typeof k === 'string') return k
-      const obj = k as { key?: string; name?: string }
-      return obj.key || obj.name || ''
-    })
-    return { names: names.filter(Boolean), complete: true }
-  }
-  return { names: [], complete: true }
-}
 
 // 列出所有记录：list 前缀扫描翻页拿 key，再批量 get 取值
 async function listItems(): Promise<RecordItem[]> {
@@ -335,30 +298,33 @@ export async function onRequest(context: {
   env: Record<string, string | undefined>
   params: { path?: string | string[] }
 }) {
+  // 统一在本仓库入口计算一次允许的 Origin（M3 收紧 CORS）
+  const origin = pickOrigin(context.request, context.env)
+
   if (context.request.method === 'OPTIONS') {
-    return new Response(null, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-      },
-    })
+    const headers: Record<string, string> = {
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    }
+    if (origin) headers['Access-Control-Allow-Origin'] = origin
+    return new Response(null, { headers })
   }
 
   const authHeader = context.request.headers.get('Authorization')
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return jsonRes({ code: 1, msg: '未授权' }, 401)
+    return jsonRes({ code: 1, msg: '未授权' }, 401, origin)
   }
 
   const token = authHeader.slice(7)
-  const uploadPassword = context.env.UPLOAD_PASSWORD
-  if (!uploadPassword) {
-    return jsonRes({ code: 1, msg: '服务器未配置上传密码' }, 500)
+  // 优先用独立的 JWT_SECRET（与登录密码解耦），未配置则回退 UPLOAD_PASSWORD（兼容）
+  const jwtSecret = context.env.JWT_SECRET || context.env.UPLOAD_PASSWORD
+  if (!jwtSecret) {
+    return jsonRes({ code: 1, msg: '服务器未配置 JWT 密钥' }, 500, origin)
   }
 
-  const valid = await verifyToken(token, uploadPassword)
+  const valid = await verifyToken(token, jwtSecret)
   if (!valid) {
-    return jsonRes({ code: 1, msg: 'token 无效或已过期' }, 401)
+    return jsonRes({ code: 1, msg: 'token 无效或已过期' }, 401, origin)
   }
 
   const method = context.request.method
@@ -372,10 +338,10 @@ export async function onRequest(context: {
         const url = new URL(context.request.url)
         const hash = (url.searchParams.get('hash') || '').trim()
         if (!hash) {
-          return jsonRes({ code: 1, msg: '缺少 hash 参数' }, 400)
+          return jsonRes({ code: 1, msg: '缺少 hash 参数' }, 400, origin)
         }
         const hit = await findByHash(hash)
-        return jsonRes({ code: 0, msg: 'ok', data: { exists: !!hit, record: hit } })
+        return jsonRes({ code: 0, msg: 'ok', data: { exists: !!hit, record: hit } }, 200, origin)
       }
 
       // 列表：优先读单 key 聚合索引 idx_all（1次get ~4ms）。
@@ -393,7 +359,7 @@ export async function onRequest(context: {
         const tb = new Date((b.createdAt as string) || 0).getTime()
         return tb - ta
       })
-      return jsonRes({ code: 0, msg: 'ok', data: { images: items, total: items.length } })
+      return jsonRes({ code: 0, msg: 'ok', data: { images: items, total: items.length } }, 200, origin)
     }
 
     if (method === 'POST') {
@@ -402,41 +368,41 @@ export async function onRequest(context: {
       // 子路由 POST /kv-api/rebuild-idx — 从每条独立 key 重建 idx_all 聚合索引
       if (firstSeg === 'rebuild-idx') {
         const result = await rebuildIndex()
-        return jsonRes({ code: 0, msg: '聚合索引重建完成', data: result })
+        return jsonRes({ code: 0, msg: '聚合索引重建完成', data: result }, 200, origin)
       }
       // 子路由 POST /kv-api/rebuild-buckets — 一次性构建 tag 桶索引（顺带刷新 idx_all）
       if (firstSeg === 'rebuild-buckets') {
         const result = await rebuildBuckets()
-        return jsonRes({ code: 0, msg: '桶索引重建完成', data: result })
+        return jsonRes({ code: 0, msg: '桶索引重建完成', data: result }, 200, origin)
       }
       const item = await addItem(body)
-      return jsonRes({ code: 0, msg: 'ok', data: item })
+      return jsonRes({ code: 0, msg: 'ok', data: item }, 200, origin)
     }
 
     if (method === 'PUT') {
       const id = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
       if (!id) {
-        return jsonRes({ code: 1, msg: '缺少 id' }, 400)
+        return jsonRes({ code: 1, msg: '缺少 id' }, 400, origin)
       }
       const body = (await context.request.json()) as Record<string, unknown>
       const updated = await updateItem(id, body as RecordItem)
       if (!updated) {
-        return jsonRes({ code: 1, msg: '记录不存在' }, 404)
+        return jsonRes({ code: 1, msg: '记录不存在' }, 404, origin)
       }
-      return jsonRes({ code: 0, msg: 'ok', data: updated })
+      return jsonRes({ code: 0, msg: 'ok', data: updated }, 200, origin)
     }
 
     if (method === 'DELETE') {
       const id = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
       if (!id) {
-        return jsonRes({ code: 1, msg: '缺少 id' }, 400)
+        return jsonRes({ code: 1, msg: '缺少 id' }, 400, origin)
       }
       await removeItem(id)
-      return jsonRes({ code: 0, msg: '删除成功' })
+      return jsonRes({ code: 0, msg: '删除成功' }, 200, origin)
     }
 
-    return jsonRes({ code: 1, msg: '不支持的请求方法' }, 405)
+    return jsonRes({ code: 1, msg: '不支持的请求方法' }, 405, origin)
   } catch (e: unknown) {
-    return jsonRes({ code: 1, msg: (e as Error).message || '操作失败' }, 500)
+    return jsonRes({ code: 1, msg: (e as Error).message || '操作失败' }, 500, origin)
   }
 }

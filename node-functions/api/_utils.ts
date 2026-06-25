@@ -15,11 +15,11 @@ async function checkDuplicateByHash(
   hash: string,
 ): Promise<{ url: string; urlOriginal?: string; thumbnailUrl?: string; assetsPath?: string; tags?: string[] } | null> {
   const baseUrl = process.env.BASE_IMG_URL?.replace(/\/$/, '') || ''
-  const uploadPassword = process.env.UPLOAD_PASSWORD
-  if (!baseUrl || !uploadPassword) return null // 未配置则跳过查重，不阻塞上传
+  const secret = process.env.JWT_SECRET || process.env.UPLOAD_PASSWORD
+  if (!baseUrl || !secret) return null // 未配置则跳过查重，不阻塞上传
   try {
-    // 服务端自签 JWT（与 auth.ts 同算法），免登录调边缘函数
-    const token = jwt.sign({}, uploadPassword, { expiresIn: '5m' })
+    // 服务端自签 JWT（与 auth.ts 同密钥），免登录调边缘函数
+    const token = jwt.sign({}, secret, { expiresIn: '5m' })
     const url = new URL(`${baseUrl}/kv-api/check`)
     url.searchParams.set('hash', hash)
     const controller = new AbortController()

@@ -89,14 +89,17 @@ pnpm dev
 
 在 EdgeOne 控制台中设置以下环境变量（不在 `.env` 文件中配置）：
 
-| 变量              | 说明                                                              | 示例                       |
-| ----------------- | ----------------------------------------------------------------- | -------------------------- |
-| `BASE_IMG_URL`    | 图床域名，**结尾必须带斜杠**                                      | `https://img.example.com/` |
-| `SLUG_IMG`        | CNB 图床仓库名                                                    | `your-username/your-repo`  |
-| `TOKEN_IMG`       | CNB 个人访问令牌                                                  | `xxxx`                     |
-| `UPLOAD_PASSWORD` | 上传密码（同时作为 JWT 密钥；未设置时登录和上传签名接口将不可用） | `your-secret-123`          |
+| 变量                  | 说明                                                                                              | 示例                       |
+| --------------------- | ------------------------------------------------------------------------------------------------- | -------------------------- |
+| `BASE_IMG_URL`        | 图床域名，**结尾必须带斜杠**                                                                      | `https://img.example.com/` |
+| `SLUG_IMG`            | CNB 图床仓库名                                                                                    | `your-username/your-repo`  |
+| `TOKEN_IMG`           | CNB 个人访问令牌                                                                                  | `xxxx`                     |
+| `UPLOAD_PASSWORD`     | 登录密码（未设置则登录接口不可用）。**不应**兼作 JWT 密钥，请配置 `JWT_SECRET`                    | `your-secret-123`          |
+| `JWT_SECRET`          | **JWT 签名密钥（强烈建议设置）**。与登录密码解耦，避免密码泄露即可伪造 token。可用 `openssl rand -hex 32` 生成 | `a1b2...(64 字符)` |
+| `KV_ALLOWED_ORIGINS`  | kv-api 管理端点的 CORS 白名单（逗号分隔），不设则用默认值（站点域名 + localhost）                | `https://img.example.com`  |
 
-> **密码保护**：设置 `UPLOAD_PASSWORD` 后，访问图床需先通过 `/login` 登录获取 JWT token，后续请求需携带 Bearer token。未设置 `UPLOAD_PASSWORD` 则登录接口返回错误，上传签名接口也因缺少 JWT 密钥而不可用。
+> **密码与密钥分离**：`UPLOAD_PASSWORD` 仅用于登录校验，`JWT_SECRET` 用于签发/验证 token。两者解耦后，即使登录密码泄露，攻击者也无法伪造 token；token 也无法反推密码。未配置 `JWT_SECRET` 时回退用 `UPLOAD_PASSWORD`（向后兼容，但建议尽快补配独立密钥）。
+> **CORS 收紧**：`kv-api`（管理/写端点）默认只允许站点域名和 localhost 调用；公开读端点（`/img`、`/img-api`、`/file-api`）保持 `*` 开放，便于跨站引用图片。
 
 ## 获取 TOKEN_IMG
 

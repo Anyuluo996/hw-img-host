@@ -31,6 +31,10 @@ export async function onRequest(context: EdgeContext) {
       headers: {
         'Content-Type': response.headers.get('Content-Type') ?? 'image/png',
         'Cache-Control': 'public, max-age=30',
+        // 阻止 SVG 等图片内嵌脚本执行（M1：防存储型 XSS）。SVG 可内嵌 <script>，
+        // 透传 image/svg+xml 后浏览器会渲染执行。CSP 禁止脚本 + 禁止外部资源加载。
+        'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+        'X-Content-Type-Options': 'nosniff',
         ...CORS_HEADERS,
       },
     })

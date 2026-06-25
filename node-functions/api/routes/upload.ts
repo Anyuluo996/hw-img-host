@@ -39,7 +39,8 @@ router.get('/sign', authMiddleware, async (req, res) => {
       }),
     )
   } catch (e: unknown) {
-    res.status(500).json(reply(1, '获取上传签名失败', { message: (e as Error).message }))
+    console.error('获取上传签名失败:', (e as Error).message)
+    res.status(500).json(reply(1, '获取上传签名失败'))
   }
 })
 
@@ -119,10 +120,11 @@ router.post(
         }),
       )
     } catch (err: unknown) {
+      // 服务端日志保留完整错误（含上游 detail），客户端只返回通用信息（M2 脱敏）
       const msg = (err as Error).message || '未知错误'
       const detail = getErrorDetail(err)
       console.error('上传失败:', msg, detail)
-      res.status(500).json(reply(1, '上传失败', { message: msg, detail }))
+      res.status(500).json(reply(1, '上传失败'))
     }
   },
 )

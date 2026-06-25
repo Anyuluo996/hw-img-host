@@ -312,6 +312,45 @@ export async function onRequest(context: {
         return jsonRes({ code: 0, msg: 'ok', data: { exists: !!hit, record: hit } })
       }
 
+      // 子路由 GET /kv-api/_bench — 性能对比基准（临时调试用）
+      // 对比三种读法：当前 list+get×N、单大 value get、tag桶 get
+      if (firstSeg === '_bench') {
+        const kv = getKV()
+        const result: Record<string, unknown> = {}
+
+        // 1. 当前方案：list 翻页 + 并发 get
+        const t1 = Date.now()
+        const items = await listItems()
+        result['list_get_all'] = { ms: Date.now() - t1, count: items.length }
+
+        // 2. 单大 value：读「全部」tag桶（一个 JSON 数组 value，~? KB）
+        const t2 = Date.now()
+        let bucketSize = 0
+        try {
+          const all = (await kv.get('tag__all', 'json')) as Array<unknown> | null
+          bucketSize = Array.isArray(all) ? all.length : 0
+        } catch {}
+        result['single_bucket_get'] = { ms: Date.now() - t2, count: bucketSize }
+
+        // 3. 纯 list（只翻页拿 key 名，不 get 值）
+        const t3 = Date.now()
+        const allKeys: string[] = []
+        let cursor: string | undefined
+        let guard = 0
+        do {
+          if (guard++ > 50) break
+          const opts: { prefix: string; limit: number; cursor?: string } = { prefix: KEY_PREFIX, limit: 256 }
+          if (cursor) opts.cursor = cursor
+          const r = await kv.list(opts)
+          const parsed = extractKeys(r)
+          allKeys.push(...parsed.names)
+          cursor = parsed.complete ? undefined : parsed.cursor
+        } while (cursor)
+        result['list_keys_only'] = { ms: Date.now() - t3, count: allKeys.length }
+
+        return jsonRes({ code: 0, msg: 'ok', data: result })
+      }
+
       // 列表前先尝试迁移旧数据（幂等：迁移完旧 key 被删，下次直接跳过）
       await migrateLegacy().catch((e) => console.error('migrate error:', (e as Error).message))
       const items = await listItems()

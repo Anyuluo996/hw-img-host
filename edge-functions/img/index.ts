@@ -123,44 +123,63 @@ export async function onRequest(context: {
   }
 
   try {
-    // 用缓存避免每次全量扫描（缓存过期或首次才真正 list）
-    let items: RecordItem[]
-    if (_cache.items && Date.now() < _cache.expireAt) {
-      items = _cache.items
-    } else {
-      items = await listItems()
-      _cache = { items, expireAt: Date.now() + CACHE_TTL }
-    }
-
-    // 只保留图片文件
-    let images = items.filter((it) => isImageName(String(it.name || '')) && (it.url || it.urlOriginal))
-
-    // 按 tag 过滤
     const url = new URL(context.request.url)
     const tagParam = url.searchParams.get('tag')
+
+    // 候选图片：优先用 tag 桶（1 次 get，冷启动也快），桶不存在才回退全量 list
+    let candidates: Array<{ u: string; o: string }> | null = null
+    const kv = getKV()
+
     if (tagParam) {
-      const wantTags = tagParam
-        .split(',')
-        .map((t) => t.trim().toLowerCase())
-        .filter(Boolean)
-      if (wantTags.length > 0) {
-        images = images.filter((it) => {
-          const itemTags = (Array.isArray(it.tags) ? it.tags : [])
-            .map((t) => String(t).toLowerCase())
+      // 多 tag（逗号分隔）：合并各桶
+      const wantTags = tagParam.split(',').map((t) => t.trim()).filter(Boolean)
+      const merged: Array<{ u: string; o: string }> = []
+      const seen = new Set<string>()
+      for (const t of wantTags) {
+        let bucket: Array<{ u: string; o: string }> | null = null
+        try {
+          const r = (await kv.get('tag_' + t, 'json')) as Array<{ u: string; o: string }> | null
+          if (Array.isArray(r)) bucket = r
+        } catch {}
+        if (bucket) {
+          for (const e of bucket) {
+            if (!seen.has(e.u)) { seen.add(e.u); merged.push(e) }
+          }
+        }
+      }
+      if (merged.length > 0) candidates = merged
+    } else {
+      // 无 tag：读「全部」桶
+      try {
+        const r = (await kv.get('tag__all', 'json')) as Array<{ u: string; o: string }> | null
+        if (Array.isArray(r)) candidates = r
+      } catch {}
+    }
+
+    // 回退：桶不存在（旧数据/未迁移）→ 全量 list + 过滤
+    if (!candidates) {
+      const items = await listItems()
+      candidates = items
+        .filter((it) => isImageName(String(it.name || '')) && (it.url || it.urlOriginal))
+        .map((it) => ({ u: String(it.urlOriginal || it.url || ''), o: String(it.urlOriginal || it.url || '') }))
+      if (tagParam) {
+        const wantTags = tagParam.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean)
+        candidates = candidates.filter((_, idx) => {
+          const it = items[idx]
+          const itemTags = (Array.isArray(it.tags) ? it.tags : []).map((t) => String(t).toLowerCase())
           return wantTags.some((w) => itemTags.includes(w))
         })
       }
     }
 
-    if (images.length === 0) {
+    if (candidates.length === 0) {
       return jsonRes({ code: 1, msg: '没有匹配的图片' }, 404)
     }
 
-    // 随机选一张，直接流式获取图片字节返回（而非 302 重定向）。
-    // 这样浏览器在 /img 端点直接显示图片，网址不变每次刷新换图。
-    const pick = images[Math.floor(Math.random() * images.length)]
-    // 优先用 CNB 原始直链（urlOriginal），避免边缘函数回调自己的 /img-api 代理
-    const target = String(pick.urlOriginal || pick.url)
+    // 随机选一张
+    const pick = candidates[Math.floor(Math.random() * candidates.length)]
+    // 优先用 CNB 原始直链（o），避免边缘函数回调自己的 /img-api 代理
+    const target = pick.o || pick.u
 
     const imgResp = await fetch(target, {
       headers: {

@@ -171,11 +171,37 @@ async function migrateLegacy(): Promise<void> {
   console.log(`migrated ${arr.length} legacy records`)
 }
 
+// 把图片加入对应 tag 桶。桶 key: tag_{名称}，value: [{u:代理url, o:CNB直链}] 数组。
+// 随机图端点直接 get 对应桶（1 次 get），避免 list + 批量 get，根治冷启动慢。
+async function addToTagBuckets(url: string, urlOriginal: unknown, tags: unknown): Promise<void> {
+  const kv = getKV()
+  const tagList = Array.isArray(tags) ? (tags as string[]) : []
+  const entry = { u: url, o: typeof urlOriginal === 'string' ? urlOriginal : url }
+  // 无 tag 的图只进「全部」桶；有 tag 的进对应桶 + 全部桶
+  const targets = tagList.length > 0 ? tagList : []
+  const bucketKeys = ['_all']
+  for (const t of targets) bucketKeys.push(t)
+  for (const bk of bucketKeys) {
+    const fullKey = 'tag_' + bk
+    let bucket: Array<{ u: string; o: string }> = []
+    try {
+      const existing = (await kv.get(fullKey, 'json')) as Array<{ u: string; o: string }> | null
+      if (Array.isArray(existing)) bucket = existing
+    } catch {}
+    if (!bucket.some((e) => e.u === url)) bucket.push(entry)
+    await kv.put(fullKey, JSON.stringify(bucket))
+  }
+}
+
 async function addItem(item: RecordItem): Promise<RecordItem> {
   const kv = getKV()
   const id = (item.id as string) || genId()
   const newItem = { ...item, id, createdAt: new Date().toISOString() }
   await kv.put(KEY_PREFIX + id, JSON.stringify(newItem))
+  // 维护 tag 桶索引，加速随机图端点
+  if (newItem.url) {
+    await addToTagBuckets(String(newItem.url), newItem.urlOriginal, newItem.tags).catch(() => {})
+  }
   return newItem
 }
 

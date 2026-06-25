@@ -97,10 +97,15 @@ function jsonRes(data: unknown, status = 200): Response {
   })
 }
 
+// 记录缓存：避免每次请求都全量 list 扫描（213 条扫描要 0.4~0.9s）。
+// TTL 内复用，随机图场景下显著降低延迟。边缘函数实例级缓存（非全局）。
+let _cache = { items: null as RecordItem[] | null, expireAt: 0 }
+const CACHE_TTL = 60 * 1000 // 60 秒
+
 // GET /img?tag=动漫        随机返回一张带「动漫」tag 的图片
 // GET /img?tag=动漫,风景    tag 任一命中即可
 // GET /img                 随机返回一张图片（全部）
-// 免登录。返回 302 重定向到图片代理 URL，网址不变每次刷新换图。
+// 免登录。直接返回图片字节（浏览器在 /img 端点显示图片，网址不变每次刷新换图）。
 export async function onRequest(context: {
   request: Request
   params: { path?: string | string[] }
@@ -118,10 +123,17 @@ export async function onRequest(context: {
   }
 
   try {
-    const items = await listItems()
+    // 用缓存避免每次全量扫描（缓存过期或首次才真正 list）
+    let items: RecordItem[]
+    if (_cache.items && Date.now() < _cache.expireAt) {
+      items = _cache.items
+    } else {
+      items = await listItems()
+      _cache = { items, expireAt: Date.now() + CACHE_TTL }
+    }
 
     // 只保留图片文件
-    let images = items.filter((it) => isImageName(String(it.name || '')) && !!it.url)
+    let images = items.filter((it) => isImageName(String(it.name || '')) && (it.url || it.urlOriginal))
 
     // 按 tag 过滤
     const url = new URL(context.request.url)

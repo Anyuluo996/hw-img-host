@@ -144,15 +144,23 @@ export async function onRequest(context: {
       return jsonRes({ code: 1, msg: '没有匹配的图片' }, 404)
     }
 
-    // 随机选一张，302 重定向到其代理 URL
+    // 随机选一张，直接流式获取图片字节返回（而非 302 重定向）。
+    // 这样浏览器在 /img 端点直接显示图片，网址不变每次刷新换图。
     const pick = images[Math.floor(Math.random() * images.length)]
     const target = String(pick.url)
 
-    return new Response(null, {
-      status: 302,
+    const imgResp = await fetch(target)
+    if (!imgResp.ok) {
+      return jsonRes({ code: 1, msg: `获取图片失败: ${imgResp.status}` }, 502)
+    }
+    const contentType = imgResp.headers.get('Content-Type') || 'image/jpeg'
+
+    // 转发图片字节，禁止缓存（保证每次刷新都换图）
+    return new Response(imgResp.body, {
+      status: 200,
       headers: {
-        Location: target,
-        'Cache-Control': 'no-store',
+        'Content-Type': contentType,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
         'Access-Control-Allow-Origin': '*',
       },
     })

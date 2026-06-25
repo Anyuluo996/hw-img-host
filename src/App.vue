@@ -9,7 +9,7 @@ const { isAuthenticated, logout } = useAuth()
 
 function handleLogout() {
   logout()
-  router.push('/login')
+  router.push('/')
 }
 </script>
 
@@ -28,7 +28,7 @@ function handleLogout() {
                 ? 'bg-muted text-foreground'
                 : 'text-muted-foreground hover:text-foreground'
             "
-            @click="router.push('/')"
+            @click="router.push('/home')"
           >
             <Upload class="h-3.5 w-3.5" />
             上传

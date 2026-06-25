@@ -13,18 +13,25 @@ const { login } = useAuth()
 const password = ref('')
 const loading = ref(false)
 const error = ref('')
+// 前端防爆破：每次点击后冷却 2 秒，期间禁用按钮，降低暴力尝试速率。
+const cooldown = ref(false)
 
 async function handleLogin() {
-  if (!password.value) return
+  if (!password.value || loading.value || cooldown.value) return
   loading.value = true
   error.value = ''
   try {
     await login(password.value)
     toast.success('登录成功')
-    router.push('/')
+    router.push('/home')
   } catch (e: unknown) {
     const err = e as { response?: { data?: { msg?: string } }; message?: string }
     error.value = err.response?.data?.msg || err.message || '登录失败'
+    // 失败后进入冷却（成功登录不需要冷却）
+    cooldown.value = true
+    setTimeout(() => {
+      cooldown.value = false
+    }, 2000)
   } finally {
     loading.value = false
   }
@@ -49,8 +56,8 @@ async function handleLogin() {
             :disabled="loading"
           />
         </div>
-        <Button type="submit" class="w-full" :disabled="loading">
-          {{ loading ? '登录中...' : '登录' }}
+        <Button type="submit" class="w-full" :disabled="loading || cooldown">
+          {{ loading ? '登录中...' : cooldown ? '请稍候...' : '登录' }}
         </Button>
         <p v-if="error" class="text-center text-sm text-destructive">{{ error }}</p>
       </form>

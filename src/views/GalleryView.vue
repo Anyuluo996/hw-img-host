@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Image, Copy, Check, ExternalLink, ArrowLeft, Loader2, Trash2, Search, Tag } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -93,6 +93,20 @@ const filteredImages = computed(() => {
     })
   }
   return list
+})
+
+// 分页：每页 20 张。数据仍一次性从 KV 拉取（无法在边缘函数侧分页），
+// 这里做客户端分页避免一次渲染上千个 DOM 节点导致卡顿。
+const PAGE_SIZE = 20
+const page = ref(1)
+const pagedImages = computed(() =>
+  filteredImages.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE),
+)
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredImages.value.length / PAGE_SIZE)))
+
+// 搜索 / 筛选改变后回到第 1 页
+watch([search, filter, filterTag], () => {
+  page.value = 1
 })
 
 // tag 编辑状态
@@ -298,7 +312,7 @@ onMounted(() => {
       <div class="mb-6 flex items-center justify-between">
         <button
           class="group inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground"
-          @click="router.push('/')"
+          @click="router.push('/home')"
         >
           <ArrowLeft class="h-4 w-4 transition group-hover:-translate-x-0.5" />
           上传文件
@@ -322,7 +336,7 @@ onMounted(() => {
       <div v-else-if="images.length === 0" class="flex flex-col items-center justify-center py-24">
         <Image class="mb-3 h-10 w-10 text-muted-foreground/40" :stroke-width="1" />
         <p class="text-sm text-muted-foreground">还没有上传的文件</p>
-        <Button variant="outline" size="sm" class="mt-4" @click="router.push('/')"> 去上传 </Button>
+        <Button variant="outline" size="sm" class="mt-4" @click="router.push('/home')"> 去上传 </Button>
       </div>
 
       <template v-else>
@@ -385,7 +399,7 @@ onMounted(() => {
 
         <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           <div
-            v-for="img in filteredImages"
+            v-for="img in pagedImages"
             :key="img.id"
             class="group relative overflow-hidden rounded-xl border bg-card transition hover:border-border"
             :class="selectedIds.has(img.id) ? 'border-foreground ring-1 ring-foreground' : 'border-border/50'"
@@ -505,10 +519,29 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="mt-8 flex justify-center">
+        <div class="mt-8 flex flex-col items-center gap-3">
           <p class="text-xs text-muted-foreground">
             共 {{ total }} 个文件{{ filteredImages.length !== total ? `（显示 ${filteredImages.length}）` : '' }}
           </p>
+          <div v-if="totalPages > 1" class="flex items-center gap-1.5">
+            <button
+              class="rounded-md border border-border/50 px-3 py-1.5 text-xs text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="page === 1"
+              @click="page--"
+            >
+              上一页
+            </button>
+            <span class="px-2 text-xs tabular-nums text-muted-foreground">
+              {{ page }} / {{ totalPages }}
+            </span>
+            <button
+              class="rounded-md border border-border/50 px-3 py-1.5 text-xs text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="page === totalPages"
+              @click="page++"
+            >
+              下一页
+            </button>
+          </div>
         </div>
       </template>
     </div>

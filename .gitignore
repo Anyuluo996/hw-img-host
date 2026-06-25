@@ -31,3 +31,9 @@ coverage
 
 # 命令行上传工具的本地配置（含密码，勿提交）
 .upload.json
+
+# 本项目用 pnpm（pnpm-lock.yaml + pnpm-workspace.yaml），避免误提交 npm 的 lockfile 造成依赖管理冲突
+package-lock.json
+
+# 本地批量上传/测试工具（含本地路径与测试用例，不随仓库分发）
+scripts/batch/

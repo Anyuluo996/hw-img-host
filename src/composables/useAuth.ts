@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue'
 import axios from 'axios'
+import { LOGIN_PATH } from '@/router'
 
 const TOKEN_KEY = 'hw_img_host_token'
 
@@ -19,7 +20,7 @@ axios.interceptors.response.use(
     if (error.response?.status === 401) {
       token.value = null
       localStorage.removeItem(TOKEN_KEY)
-      window.location.href = '/login'
+      window.location.href = LOGIN_PATH
     }
     return Promise.reject(error)
   },

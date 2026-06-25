@@ -225,6 +225,34 @@ async function updateItem(id: string, patch: RecordItem): Promise<RecordItem | n
   return updated
 }
 
+// 重建所有 tag 桶：拉全量记录 → 分桶 → 覆盖式写入 tag_{名称} key。
+// 用于存量数据迁移（让 /img 随机端点能走桶索引）。
+async function rebuildBuckets(): Promise<{ buckets: number; total: number }> {
+  const kv = getKV()
+  const items = await listItems()
+  const buckets: Record<string, Array<{ u: string; o: string }>> = { _all: [] }
+
+  for (const it of items) {
+    const url = String(it.url || '')
+    const o = String(it.urlOriginal || url)
+    if (!url) continue
+    const entry = { u: url, o }
+    buckets._all.push(entry)
+    for (const t of Array.isArray(it.tags) ? (it.tags as string[]) : []) {
+      const k = String(t)
+      if (!buckets[k]) buckets[k] = []
+      if (!buckets[k].some((e) => e.u === url)) buckets[k].push(entry)
+    }
+  }
+
+  let count = 0
+  for (const [tag, entries] of Object.entries(buckets)) {
+    await kv.put('tag_' + tag, JSON.stringify(entries))
+    count++
+  }
+  return { buckets: count, total: items.length }
+}
+
 async function removeItem(id: string): Promise<void> {
   await getKV().delete(KEY_PREFIX + id)
 }
@@ -298,6 +326,12 @@ export async function onRequest(context: {
 
     if (method === 'POST') {
       const body = (await context.request.json()) as Record<string, unknown>
+      // 子路由 POST /kv-api/rebuild-buckets — 一次性构建 tag 桶索引
+      const firstSeg = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      if (firstSeg === 'rebuild-buckets') {
+        const result = await rebuildBuckets()
+        return jsonRes({ code: 0, msg: '桶索引重建完成', data: result })
+      }
       const item = await addItem(body)
       return jsonRes({ code: 0, msg: 'ok', data: item })
     }

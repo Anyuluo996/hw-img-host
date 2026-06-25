@@ -147,11 +147,20 @@ export async function onRequest(context: {
     // 随机选一张，直接流式获取图片字节返回（而非 302 重定向）。
     // 这样浏览器在 /img 端点直接显示图片，网址不变每次刷新换图。
     const pick = images[Math.floor(Math.random() * images.length)]
-    const target = String(pick.url)
+    // 优先用 CNB 原始直链（urlOriginal），避免边缘函数回调自己的 /img-api 代理
+    const target = String(pick.urlOriginal || pick.url)
 
-    const imgResp = await fetch(target)
+    const imgResp = await fetch(target, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome',
+      },
+    })
     if (!imgResp.ok) {
-      return jsonRes({ code: 1, msg: `获取图片失败: ${imgResp.status}` }, 502)
+      return jsonRes(
+        { code: 1, msg: `获取图片失败: ${imgResp.status}`, target },
+        502,
+      )
     }
     const contentType = imgResp.headers.get('Content-Type') || 'image/jpeg'
 

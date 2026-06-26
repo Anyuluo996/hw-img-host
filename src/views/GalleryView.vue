@@ -41,9 +41,23 @@ interface ListResponse {
 const IMAGE_EXTS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tiff',
 ])
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'ogg', 'ogv', 'mov', 'm4v'])
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'oga', 'flac', 'aac', 'm4a'])
 function isImageName(name: string): boolean {
   const m = String(name).toLowerCase().match(/\.([a-z0-9]+)$/)
   return !!m && !!m[1] && IMAGE_EXTS.has(m[1])
+}
+function isVideoName(name: string): boolean {
+  const m = String(name).toLowerCase().match(/\.([a-z0-9]+)$/)
+  return !!m && !!m[1] && VIDEO_EXTS.has(m[1])
+}
+function isAudioName(name: string): boolean {
+  const m = String(name).toLowerCase().match(/\.([a-z0-9]+)$/)
+  return !!m && !!m[1] && AUDIO_EXTS.has(m[1])
+}
+// 是否可在浏览器内预览（图片/视频/音频），用于决定卡片是否显示媒体预览
+function isMediaName(name: string): boolean {
+  return isImageName(name) || isVideoName(name) || isAudioName(name)
 }
 
 const images = ref<ImageRecord[]>([])
@@ -411,6 +425,7 @@ onMounted(() => {
             />
 
             <div class="relative aspect-4/3 overflow-hidden bg-muted/30">
+              <!-- 图片 -->
               <img
                 v-if="isImageName(img.name)"
                 :src="img.thumbnailUrl || img.url"
@@ -419,6 +434,27 @@ onMounted(() => {
                 loading="lazy"
                 @error="brokenImages.add(img.id)"
               />
+              <!-- 视频：取首帧作预览（preload metadata + 显示第一帧）-->
+              <video
+                v-else-if="isVideoName(img.name)"
+                :src="img.url"
+                class="h-full w-full object-cover transition group-hover:scale-105"
+                preload="metadata"
+                muted
+                playsinline
+                @loadeddata="($event.target as HTMLVideoElement).pause()"
+                @error="brokenImages.add(img.id)"
+              />
+              <!-- 音频：用音符图标占位（无视觉帧）-->
+              <div v-else-if="isAudioName(img.name)" class="flex h-full flex-col items-center justify-center gap-2">
+                <svg class="h-10 w-10 text-muted-foreground/40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 18V5l12-2v13" />
+                  <circle cx="6" cy="18" r="3" />
+                  <circle cx="18" cy="16" r="3" />
+                </svg>
+                <span class="text-[10px] text-muted-foreground/50">音频</span>
+              </div>
+              <!-- 其他文件：显示扩展名 -->
               <div v-else class="flex h-full items-center justify-center">
                 <span class="text-2xl font-light text-muted-foreground/40">
                   .{{ img.name.split('.').pop() }}
@@ -429,6 +465,19 @@ onMounted(() => {
                 class="absolute inset-0 flex items-center justify-center bg-muted/30"
               >
                 <Image class="h-8 w-8 text-muted-foreground/50" :stroke-width="1" />
+              </div>
+              <!-- 视频角标 -->
+              <span
+                v-if="isVideoName(img.name) && !brokenImages.has(img.id)"
+                class="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
+              >视频</span>
+              <!-- 加载失败兜底（图片/视频）-->
+              <div
+                v-if="(isVideoName(img.name)) && brokenImages.has(img.id)"
+                class="absolute inset-0 flex flex-col items-center justify-center bg-muted/30"
+              >
+                <Image class="h-8 w-8 text-muted-foreground/50" :stroke-width="1" />
+                <span class="mt-1 text-[10px] text-muted-foreground/50">预览不可用</span>
               </div>
               <div class="absolute inset-0 bg-black/0 transition group-hover:bg-black/20" />
               <div class="absolute right-2 top-2 flex gap-1.5">
@@ -475,6 +524,8 @@ onMounted(() => {
               </p>
               <div class="flex items-center justify-between text-[11px] text-muted-foreground/70">
                 <span v-if="isImageName(img.name)">{{ img.width }}x{{ img.height }}</span>
+                <span v-else-if="isVideoName(img.name)" class="rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-600 dark:text-blue-400">视频</span>
+                <span v-else-if="isAudioName(img.name)" class="rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] text-purple-600 dark:text-purple-400">音频</span>
                 <span v-else class="rounded bg-muted px-1.5 py-0.5 text-[10px]">文件</span>
                 <span>{{ formatSize(img.size) }}</span>
               </div>

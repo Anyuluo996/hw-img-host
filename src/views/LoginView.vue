@@ -42,7 +42,7 @@ async function handleLogin() {
   <div class="min-h-screen flex items-center justify-center bg-background px-4">
     <div class="w-full max-w-sm space-y-6">
       <div class="space-y-2 text-center">
-        <h1 class="text-2xl font-normal tracking-wide text-foreground">HW 图床</h1>
+        <h1 class="text-2xl font-normal tracking-wide text-foreground">图床</h1>
         <p class="text-sm text-muted-foreground">请输入密码以继续</p>
       </div>
       <form class="space-y-4" @submit.prevent="handleLogin">

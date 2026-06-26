@@ -1,3 +1,5 @@
+import { mimeForPath, shouldInline } from '../_mime'
+
 interface EdgeContext {
   request: Request
   env: Record<string, string | undefined>
@@ -5,12 +7,6 @@ interface EdgeContext {
 }
 
 const CORS_HEADERS: Record<string, string> = { 'Access-Control-Allow-Origin': '*' }
-
-// 可在浏览器内联展示的类型：图片、视频、音频。
-// 其余类型（zip/pdf/exe...）强制下载，避免浏览器执行未知内容。
-function shouldInline(contentType: string): boolean {
-  return /^(image|video|audio)\//i.test(contentType)
-}
 
 // 任意文件类型的代理（区别于 img-api 的图片专用代理）。
 // 目标：https://cnb.cool/<SLUG_IMG>/-/files/<path>
@@ -46,7 +42,12 @@ export async function onRequest(context: EdgeContext) {
     const fileName = pathStr.split('/').pop() || 'file'
     const downloadName = encodeURIComponent(fileName)
 
-    const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream'
+    // 关键：CNB files 端点对非媒体文件统一返回 text/plain（实测 js/css/字体/pdf 全是），
+    // 浏览器会因 MIME 不匹配拒绝执行 <script>/加载 @font-face。这里按扩展名修正。
+    const upstreamCt = response.headers.get('Content-Type') ?? 'application/octet-stream'
+    const fixedByExt = mimeForPath(fileName, '')
+    // CNB 返回 text/plain 但扩展名能识别出更精确类型时，用扩展名的 MIME 覆盖
+    const contentType = fixedByExt && /^text\/plain/i.test(upstreamCt) ? fixedByExt : upstreamCt
     const isInline = shouldInline(contentType)
     const disposition = isInline
       ? 'inline'

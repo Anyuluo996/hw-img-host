@@ -434,6 +434,69 @@ interface CheckResponse {
   msg?: string
   data?: { exists: boolean; record?: Record<string, unknown> }
 }
+
+// /sign 响应：申请 CNB 上传元数据
+interface SignResponse {
+  code: number
+  msg?: string
+  data?: {
+    assets: { path: string; __type?: string }
+    upload_url: string
+    proxy_path: string
+    type: 'imgs' | 'files'
+  }
+}
+
+// node-function 实测请求体上限约 5-6MB，超过此阈值改走边缘代理直传 CNB
+const DIRECT_UPLOAD_THRESHOLD = 4 * 1024 * 1024
+
+// 大文件直传：/sign 拿 upload_url → 边缘代理 PUT → 返回上传结果
+// 绕开 node-function 的请求体限制，支持视频等大文件。
+async function directUpload(
+  f: File,
+  onProgress?: (pct: number) => void,
+): Promise<{ proxyUrl: string; originUrl: string; assetsPath: string }> {
+  const token = localStorage.getItem('hw_img_host_token')
+  // 1. 申请签名
+  const signRes = await axios.get<SignResponse>('/api/upload/sign', {
+    params: { name: f.name, size: f.size },
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (signRes.data.code !== 0 || !signRes.data.data) {
+    throw new Error(signRes.data.msg || '获取上传签名失败')
+  }
+  const { upload_url, proxy_path, assets } = signRes.data.data
+
+  // 2. 从 upload_url 提取 CNB token，拼边缘代理 URL
+  // upload_url 形如 https://asset.cnb.cool/assets/t/<token>
+  const tokenMatch = upload_url.match(/\/assets\/t\/(.+)$/)
+  if (!tokenMatch) throw new Error('上传地址格式异常')
+  const proxyUploadUrl = `/upload-proxy/assets/t/${tokenMatch[1]}`
+
+  // 3. PUT 到边缘代理（流式转发到 CNB，不经 node-function）
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', proxyUploadUrl)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      else reject(new Error(`直传失败: ${xhr.status}`))
+    }
+    xhr.onerror = () => reject(new Error('直传网络错误'))
+    xhr.send(f)
+  })
+
+  return {
+    proxyUrl: proxy_path,
+    originUrl: 'https://cnb.cool' + assets.path,
+    assetsPath: assets.path,
+  }
+}
 async function checkDuplicate(hash: string): Promise<Record<string, unknown> | null> {
   const token = localStorage.getItem('hw_img_host_token')
   try {
@@ -574,6 +637,38 @@ async function uploadFile(): Promise<void> {
 
     uploading.value = true
     uploadProgress.value = 0
+
+    // 大文件（>4MB）走边缘代理直传 CNB，绕开 node-function 实测约 5-6MB 的请求体限制。
+    // 视频等非图片大文件无压缩空间，直传更合适。小文件仍走 node-function（保留服务端查重/哈希）。
+    if (file.value.size > DIRECT_UPLOAD_THRESHOLD) {
+      const result = await directUpload(file.value, (pct) => {
+        uploadProgress.value = pct
+      })
+      uploadedUrl.value = result.proxyUrl
+      const uploadInfo: UploadInfo = {
+        url: result.proxyUrl,
+        urlOriginal: result.originUrl,
+        thumbnailUrl: undefined,
+        thumbnailOriginalUrl: undefined,
+        name: file.value.name,
+        size: file.value.size,
+        type: file.value.type,
+        compressionRatio: 0,
+        width: imageWidth.value,
+        height: imageHeight.value,
+        hasThumbnail: false,
+        thumbnailWidth: 0,
+        thumbnailHeight: 0,
+        thumbnailSize: 0,
+        assetsPath: result.assetsPath,
+        tags: [],
+        hash: fileHash.value,
+        duplicate: false,
+      }
+      emit('update:uploadInfo', uploadInfo)
+      toast.success('上传成功')
+      return
+    }
 
     // 走后端 /api/upload/img 转发上传，由服务器代传到 CNB，
     // 避免浏览器直传 asset.cnb.cool 触发跨域 Origin 校验 403（网络错误）。

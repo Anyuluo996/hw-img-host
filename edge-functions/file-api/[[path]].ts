@@ -1,14 +1,21 @@
 interface EdgeContext {
+  request: Request
   env: Record<string, string | undefined>
   params: { path?: string | string[] }
 }
 
 const CORS_HEADERS: Record<string, string> = { 'Access-Control-Allow-Origin': '*' }
 
+// 可在浏览器内联展示的类型：图片、视频、音频。
+// 其余类型（zip/pdf/exe...）强制下载，避免浏览器执行未知内容。
+function shouldInline(contentType: string): boolean {
+  return /^(image|video|audio)\//i.test(contentType)
+}
+
 // 任意文件类型的代理（区别于 img-api 的图片专用代理）。
 // 目标：https://cnb.cool/<SLUG_IMG>/-/files/<path>
-// CNB 的 files 端点会按文件内容返回正确的 Content-Type（如 application/pdf、application/zip），
-// 这里原样透传，并强制浏览器下载非内联展示型文件以免触发 XSS。
+// CNB 的 files 端点会按文件内容返回正确的 Content-Type（如 application/pdf、video/mp4）。
+// 透传 Range 请求，支持视频/音频拖动进度条；视频/音频/图片内联展示，其余强制下载。
 export async function onRequest(context: EdgeContext) {
   const urlPath = context.params.path
   if (!urlPath) {
@@ -22,33 +29,48 @@ export async function onRequest(context: EdgeContext) {
   const targetUrl = `https://cnb.cool/${context.env.SLUG_IMG}/-/files/${pathStr}`
 
   try {
-    const response = await fetch(targetUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome',
-      },
-    })
+    // 收集要透传给 CNB 的请求头。
+    // 关键：透传 Range 头，让 CNB 返回 206 分段内容（视频拖动进度条所需）。
+    const upstreamHeaders: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome',
+    }
+    const range = context.request.headers.get('Range')
+    if (range) {
+      upstreamHeaders['Range'] = range
+    }
+
+    const response = await fetch(targetUrl, { headers: upstreamHeaders })
 
     // files 路径可能包含中文/空格的原始文件名，用 encodeURIComponent 生成 ASCII 文件名头
     const fileName = pathStr.split('/').pop() || 'file'
     const downloadName = encodeURIComponent(fileName)
 
-    // 图片类仍允许内联展示；其余类型（zip/pdf/exe...）默认下载，避免浏览器执行
     const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream'
-    const isInline = /^image\//i.test(contentType)
+    const isInline = shouldInline(contentType)
     const disposition = isInline
       ? 'inline'
       : `attachment; filename="${downloadName}"; filename*=UTF-8''${downloadName}`
 
+    // 组装响应头：透传 Range 相关头（Accept-Ranges/Content-Range/Content-Length），
+    // 让浏览器正确处理分段内容。
+    const respHeaders: Record<string, string> = {
+      'Content-Type': contentType,
+      'Content-Disposition': disposition,
+      'Cache-Control': 'public, max-age=30',
+      ...CORS_HEADERS,
+    }
+    const acceptRanges = response.headers.get('Accept-Ranges')
+    if (acceptRanges) respHeaders['Accept-Ranges'] = acceptRanges
+    const contentRange = response.headers.get('Content-Range')
+    if (contentRange) respHeaders['Content-Range'] = contentRange
+    const contentLength = response.headers.get('Content-Length')
+    if (contentLength) respHeaders['Content-Length'] = contentLength
+
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: {
-        'Content-Type': contentType,
-        'Content-Disposition': disposition,
-        'Cache-Control': 'public, max-age=30',
-        ...CORS_HEADERS,
-      },
+      headers: respHeaders,
     })
   } catch (e: unknown) {
     return new Response(JSON.stringify({ error: (e as Error)?.message || String(e) }), {

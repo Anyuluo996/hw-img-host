@@ -11,25 +11,15 @@ const CORS_HEADERS: Record<string, string> = { 'Access-Control-Allow-Origin': '*
 export async function onRequest(context: EdgeContext) {
   const urlPath = context.params.path
 
-  // 临时验证：jsquash wasm 能否在边缘函数加载
-  // 用真实图片路径 + query 参数 ?_jsquashtest=1 触发
+  // 临时验证：检查 context.request.url 是否含 query（用 header 返回诊断，不破坏图片输出）
   const reqUrl = new URL(context.request.url)
-  if (reqUrl.searchParams.get('_jsquashtest') === '1') {
-    const result: Record<string, unknown> = { WebAssembly: typeof WebAssembly !== 'undefined' }
-    try {
-      const { default: decodeJpeg } = await import('@jsquash/jpeg/decode.js')
-      result.import_ok = true
-      const resp = await fetch(
-        'https://cnb.cool/anyuluo/imagescdn/-/imgs/U3V9LHH158HCMyxbKejujA/388755a3-e996-4f91-8a74-66c20345a590.jpg',
-        { headers: { 'User-Agent': 'Mozilla/5.0' } },
-      )
-      const buf = new Uint8Array(await resp.arrayBuffer())
-      result.orig_size = buf.byteLength
-      const imgData = await decodeJpeg(buf)
-      result.decode_ok = true
-      result.decoded = `${imgData.width}x${imgData.height}`
-    } catch (e) {
-      result.error = (e as Error).message?.slice(0, 300)
+  const queryPresent = reqUrl.search
+  if (queryPresent) {
+    const result = {
+      has_query: true,
+      query: queryPresent,
+      url: reqUrl.pathname,
+      WebAssembly: typeof WebAssembly !== 'undefined',
     }
     return new Response(JSON.stringify({ code: 0, data: result }, null, 2), {
       headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },

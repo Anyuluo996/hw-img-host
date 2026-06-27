@@ -1,4 +1,7 @@
+import { mimeForPath } from '../_mime'
+
 interface EdgeContext {
+  request: Request
   env: Record<string, string | undefined>
   params: { path?: string | string[] }
 }
@@ -7,6 +10,31 @@ const CORS_HEADERS: Record<string, string> = { 'Access-Control-Allow-Origin': '*
 
 export async function onRequest(context: EdgeContext) {
   const urlPath = context.params.path
+
+  // 临时验证：jsquash wasm 能否在边缘函数加载
+  // 访问 /img-api/__jsquash_test 触发
+  const testSeg = Array.isArray(urlPath) ? urlPath[0] : urlPath
+  if (testSeg === '__jsquash_test') {
+    const result: Record<string, unknown> = { WebAssembly: typeof WebAssembly !== 'undefined' }
+    try {
+      const { default: decodeJpeg } = await import('@jsquash/jpeg/decode.js')
+      result.import_ok = true
+      const resp = await fetch(
+        'https://cnb.cool/anyuluo/imagescdn/-/imgs/U3V9LHH158HCMyxbKejujA/388755a3-e996-4f91-8a74-66c20345a590.jpg',
+        { headers: { 'User-Agent': 'Mozilla/5.0' } },
+      )
+      const buf = new Uint8Array(await resp.arrayBuffer())
+      result.orig_size = buf.byteLength
+      const imgData = await decodeJpeg(buf)
+      result.decode_ok = true
+      result.decoded = `${imgData.width}x${imgData.height}`
+    } catch (e) {
+      result.error = (e as Error).message?.slice(0, 300)
+    }
+    return new Response(JSON.stringify({ code: 0, data: result }, null, 2), {
+      headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
+    })
+  }
   if (!urlPath) {
     return new Response(JSON.stringify({ error: 'No path provided' }), {
       status: 400,

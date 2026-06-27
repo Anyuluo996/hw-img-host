@@ -37,3 +37,9 @@ package-lock.json
 
 # 本地批量上传/测试工具（含本地路径与测试用例，不随仓库分发）
 scripts/batch/
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+  

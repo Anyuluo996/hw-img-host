@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@img/sharp-libvips-linux-x64':
+        specifier: ^1.3.1
+        version: 1.3.1
+      '@img/sharp-linux-x64':
+        specifier: ^0.35.2
+        version: 0.35.2
       '@tailwindcss/vite':
         specifier: ^4.3.0
         version: 4.3.0(vite@8.0.14(@types/node@22.19.19)(jiti@2.7.0))
@@ -63,6 +69,12 @@ importers:
         specifier: ^2.0.9
         version: 2.0.9
     devDependencies:
+      '@img/sharp-libvips-linuxmusl-x64':
+        specifier: ^1.3.1
+        version: 1.3.1
+      '@img/sharp-linuxmusl-x64':
+        specifier: ^0.35.2
+        version: 0.35.2
       '@tsconfig/node22':
         specifier: ^22.0.5
         version: 22.0.5
@@ -355,7 +367,6 @@ packages:
     engines: {node: '>=20.9.0'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@img/sharp-wasm32@0.35.2':
     resolution: {integrity: sha512-Mrv4JQNYVQ94xH+jzZ9r+gowleN8mv2FTgKT+PI6bx5C0G8TdNYndu161pg2i7uoBwxy2ImPMHrJOM2LZef7Bw==}
@@ -2459,14 +2470,12 @@ snapshots:
   '@img/sharp-libvips-linux-s390x@1.3.1':
     optional: true
 
-  '@img/sharp-libvips-linux-x64@1.3.1':
-    optional: true
+  '@img/sharp-libvips-linux-x64@1.3.1': {}
 
   '@img/sharp-libvips-linuxmusl-arm64@1.3.1':
     optional: true
 
-  '@img/sharp-libvips-linuxmusl-x64@1.3.1':
-    optional: true
+  '@img/sharp-libvips-linuxmusl-x64@1.3.1': {}
 
   '@img/sharp-linux-arm64@0.35.2':
     optionalDependencies:
@@ -2496,7 +2505,6 @@ snapshots:
   '@img/sharp-linux-x64@0.35.2':
     optionalDependencies:
       '@img/sharp-libvips-linux-x64': 1.3.1
-    optional: true
 
   '@img/sharp-linuxmusl-arm64@0.35.2':
     optionalDependencies:
@@ -2506,7 +2514,6 @@ snapshots:
   '@img/sharp-linuxmusl-x64@0.35.2':
     optionalDependencies:
       '@img/sharp-libvips-linuxmusl-x64': 1.3.1
-    optional: true
 
   '@img/sharp-wasm32@0.35.2':
     dependencies:

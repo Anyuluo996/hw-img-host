@@ -13,7 +13,7 @@
     >
       <input type="file" @change="onFileChange" class="hidden" />
       <span v-if="!file">
-        {{ isDragging ? '释放文件上传' : '点击或拖拽上传文件' }}
+        {{ isDragging ? '释放文件上传' : '点击、拖拽或粘贴（Ctrl+V）上传' }}
       </span>
       <div v-else-if="processing" class="flex items-center gap-2 text-muted-foreground">
         <LoaderIcon class="h-5 w-5 animate-spin" />
@@ -96,7 +96,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import axios, { type AxiosProgressEvent } from 'axios'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -177,6 +177,81 @@ function isImageFile(name: string): boolean {
   return !!m && !!m[1] && IMAGE_EXTS.has(m[1])
 }
 
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'ogg', 'ogv', 'mov', 'm4v'])
+function isVideoFile(name: string): boolean {
+  const m = String(name).toLowerCase().match(/\.([a-z0-9]+)$/)
+  return !!m && !!m[1] && VIDEO_EXTS.has(m[1])
+}
+
+// 视频首帧截图：用 <video> + canvas 截取第一帧作缩略图（不依赖 ffmpeg）。
+// 上传时生成，与图片缩略图同等处理，让视频在图库有预览。
+function captureVideoFrame(videoFile: File): Promise<ThumbnailResult> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(videoFile)
+    const video = document.createElement('video')
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'metadata'
+    video.src = url
+
+    const cleanup = () => URL.revokeObjectURL(url)
+
+    video.onloadedmetadata = () => {
+      // seek 到 0.1s 取首帧（0s 在某些视频是黑屏）
+      video.currentTime = Math.min(0.1, (video.duration || 1) / 2)
+    }
+    video.onseeked = () => {
+      try {
+        let width = video.videoWidth
+        let height = video.videoHeight
+        const maxW = props.thumbnailMaxWidth
+        const maxH = props.thumbnailMaxHeight
+        if (width > maxW || height > maxH) {
+          const ratio = Math.min(maxW / width, maxH / height)
+          width = Math.round(width * ratio)
+          height = Math.round(height * ratio)
+        }
+        const canvas = document.createElement('canvas')
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          cleanup()
+          reject(new Error('无法获取 canvas context'))
+          return
+        }
+        ctx.drawImage(video, 0, 0, width, height)
+        canvas.toBlob(
+          (blob) => {
+            cleanup()
+            if (blob) {
+              const thumbFile = new File([blob], 'frame.jpg', { type: 'image/jpeg' })
+              resolve({
+                thumbnailFile: thumbFile,
+                previewUrl: URL.createObjectURL(blob),
+                width,
+                height,
+                size: blob.size,
+              })
+            } else {
+              reject(new Error('视频首帧截图失败'))
+            }
+          },
+          'image/jpeg',
+          props.thumbnailQuality,
+        )
+      } catch (e) {
+        cleanup()
+        reject(e instanceof Error ? e : new Error('截图异常'))
+      }
+    }
+    video.onerror = () => {
+      cleanup()
+      reject(new Error('视频加载失败'))
+    }
+  })
+}
+
 const props = withDefaults(defineProps<Props>(), {
   maxWidth: 0,
   maxHeight: 0,
@@ -249,6 +324,38 @@ watch(
 
 onUnmounted(() => {
   if (qualityDebounceTimer) clearTimeout(qualityDebounceTimer)
+})
+
+// 粘贴上传：Ctrl+V 直接上传剪贴板里的图片/文件（截图场景极方便）。
+// 仅在组件可见且当前没在处理/上传时响应，避免干扰输入框粘贴。
+function handlePaste(e: ClipboardEvent): void {
+  if (processing.value || uploading.value) return
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const f = item.getAsFile()
+      if (f) {
+        e.preventDefault()
+        // 粘贴的截图通常无文件名，给个默认名
+        if (!f.name || f.name.startsWith('image')) {
+          const ext = f.type.split('/')[1] || 'png'
+          handleFile(new File([f], `paste-${Date.now()}.${ext}`, { type: f.type }))
+        } else {
+          handleFile(f)
+        }
+        return
+      }
+    }
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('paste', handlePaste)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('paste', handlePaste)
 })
 
 async function compressImageToWebp(
@@ -577,12 +684,31 @@ async function handleFile(f: File | null): Promise<void> {
         thumbnailSize.value = thumbnail.size
       }
     } else {
-      // 非图片：原文件直传，不做压缩、不生成缩略图
+      // 非图片：原文件直传，不做压缩。
+      // 视频额外截首帧作缩略图（canvas，不依赖 ffmpeg），让图库有预览。
       file.value = f
       compressionRatio.value = 0
       imageWidth.value = 0
       imageHeight.value = 0
       thumbnailFile.value = null
+      thumbnailPreview.value = ''
+
+      if (isVideoFile(f.name) && props.generateThumbnail) {
+        try {
+          const frame = await captureVideoFrame(f)
+          thumbnailFile.value = frame.thumbnailFile
+          thumbnailPreview.value = frame.previewUrl
+          thumbnailWidth.value = frame.width
+          thumbnailHeight.value = frame.height
+          thumbnailSize.value = frame.size
+          // 视频首帧尺寸作为视频的展示尺寸
+          imageWidth.value = frame.width
+          imageHeight.value = frame.height
+        } catch (e) {
+          // 首帧截图失败不阻塞上传，只是没缩略图
+          console.warn('视频首帧截图失败:', e)
+        }
+      }
       thumbnailPreview.value = ''
     }
 

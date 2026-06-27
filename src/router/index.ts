@@ -28,6 +28,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/tags',
+      name: 'tags',
+      component: () => import('../views/TagsView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       // 秘密登录路径，不主动暴露。
       path: LOGIN_PATH,
       name: 'login',

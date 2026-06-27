@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { Image, Copy, Check, ExternalLink, ArrowLeft, Loader2, Trash2, Search, Tag } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,6 +28,7 @@ interface ImageRecord {
 }
 
 const router = useRouter()
+const route = useRoute()
 
 interface ListResponse {
   code: number
@@ -69,8 +70,12 @@ const copiedId = ref('')
 
 // 搜索与筛选
 const search = ref('')
-const filter = ref<'all' | 'image' | 'file'>('all')
+const filter = ref<'all' | 'image' | 'file' | 'untagged'>('all')
 const filterTag = ref<string>('') // 按 tag 筛选
+// 支持 /gallery?tag=xxx 直接筛选（标签管理页跳转用）
+if (route.query.tag && typeof route.query.tag === 'string' && route.query.tag) {
+  filterTag.value = route.query.tag
+}
 
 // 所有已用过的 tag 列表（供筛选下拉）
 const allTags = computed(() => {
@@ -83,10 +88,12 @@ const allTags = computed(() => {
 
 const filteredImages = computed(() => {
   let list = images.value
-  if (filter.value !== 'all') {
-    list = list.filter((img) =>
-      filter.value === 'image' ? isImageName(img.name) : !isImageName(img.name),
-    )
+  if (filter.value === 'image') {
+    list = list.filter((img) => isImageName(img.name))
+  } else if (filter.value === 'file') {
+    list = list.filter((img) => !isImageName(img.name))
+  } else if (filter.value === 'untagged') {
+    list = list.filter((img) => !Array.isArray(img.tags) || img.tags.length === 0)
   }
   if (filterTag.value) {
     const t = filterTag.value.toLowerCase()
@@ -274,6 +281,53 @@ async function deleteOne(img: ImageRecord) {
   }
 }
 
+// 批量打标签
+const batchTagging = ref(false)
+const batchTagInput = ref('')
+const batchTagMode = ref<'append' | 'replace'>('append')
+
+async function applyBatchTags() {
+  const inputTags = batchTagInput.value
+    .split(/[,，]/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+  if (inputTags.length === 0) {
+    toast.error('请输入标签')
+    return
+  }
+  const targets = images.value.filter((i) => selectedIds.value.has(i.id))
+  if (targets.length === 0) return
+
+  batchTagging.value = true
+  let okCount = 0
+  for (const img of targets) {
+    const newTags =
+      batchTagMode.value === 'replace'
+        ? inputTags
+        : Array.from(new Set([...(img.tags || []), ...inputTags]))
+    try {
+      const res = await fetch(`/kv-api/${img.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ tags: newTags }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (json.code === 0) {
+        img.tags = newTags
+        okCount++
+      }
+    } catch {
+      /* 单条失败继续 */
+    }
+  }
+  batchTagging.value = false
+  showBatchTagDialog.value = false
+  batchTagInput.value = ''
+  toast.success(`已为 ${okCount}/${targets.length} 项${batchTagMode.value === 'replace' ? '设置' : '追加'}标签`)
+}
+
+const showBatchTagDialog = ref(false)
+
 // 批量删除
 async function deleteSelected() {
   const targets = images.value.filter((i) => selectedIds.value.has(i.id))
@@ -359,7 +413,12 @@ onMounted(() => {
           </div>
           <div class="flex items-center gap-1 rounded-lg border border-border/50 p-0.5">
             <button
-              v-for="opt in [{ k: 'all', t: '全部' }, { k: 'image', t: '图片' }, { k: 'file', t: '文件' }] as const"
+              v-for="opt in [
+                { k: 'all', t: '全部' },
+                { k: 'image', t: '图片' },
+                { k: 'file', t: '文件' },
+                { k: 'untagged', t: '未分类' },
+              ] as const"
               :key="opt.k"
               class="rounded-md px-3 py-1 text-xs transition"
               :class="filter === opt.k ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground'"
@@ -393,15 +452,62 @@ onMounted(() => {
             </button>
             <span>已选 {{ selectedIds.size }} / {{ filteredImages.length }} 项</span>
           </div>
-          <Button
-            variant="destructive"
-            size="sm"
-            :disabled="selectedIds.size === 0 || deleting"
-            @click="deleteSelected"
-          >
-            <Trash2 class="mr-1.5 h-3.5 w-3.5" />
-            删除选中
-          </Button>
+          <div class="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="selectedIds.size === 0 || batchTagging"
+              @click="showBatchTagDialog = true"
+            >
+              <Tag class="mr-1.5 h-3.5 w-3.5" />
+              打标签
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              :disabled="selectedIds.size === 0 || deleting"
+              @click="deleteSelected"
+            >
+              <Trash2 class="mr-1.5 h-3.5 w-3.5" />
+              删除选中
+            </Button>
+          </div>
+        </div>
+
+        <!-- 批量打标签对话框 -->
+        <div
+          v-if="showBatchTagDialog"
+          class="mb-4 rounded-lg border border-border/50 bg-card p-4"
+        >
+          <p class="mb-2 text-xs text-muted-foreground">
+            为选中的 {{ selectedIds.size }} 项设置标签（逗号分隔）
+          </p>
+          <Input
+            v-model="batchTagInput"
+            placeholder="例如：鸣潮, 原神"
+            class="mb-3"
+            @keyup.enter="applyBatchTags"
+          />
+          <div class="mb-3 flex items-center gap-3 text-xs">
+            <button
+              :class="batchTagMode === 'append' ? 'text-foreground' : 'text-muted-foreground'"
+              @click="batchTagMode = 'append'"
+            >
+              ⊕ 追加（保留已有标签）
+            </button>
+            <button
+              :class="batchTagMode === 'replace' ? 'text-foreground' : 'text-muted-foreground'"
+              @click="batchTagMode = 'replace'"
+            >
+              ⇄ 替换（覆盖已有标签）
+            </button>
+          </div>
+          <div class="flex gap-2">
+            <Button size="sm" :disabled="batchTagging" @click="applyBatchTags">
+              {{ batchTagging ? '处理中...' : '确认' }}
+            </Button>
+            <Button variant="outline" size="sm" @click="showBatchTagDialog = false">取消</Button>
+          </div>
         </div>
 
         <div v-if="filteredImages.length === 0" class="flex flex-col items-center justify-center py-16">

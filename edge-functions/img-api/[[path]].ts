@@ -12,9 +12,9 @@ export async function onRequest(context: EdgeContext) {
   const urlPath = context.params.path
 
   // 临时验证：jsquash wasm 能否在边缘函数加载
-  // 访问 /img-api/__jsquash_test 触发
+  // 访问 /img-api/jsquashtest 触发
   const testSeg = Array.isArray(urlPath) ? urlPath[0] : urlPath
-  if (testSeg === '__jsquash_test') {
+  if (testSeg === 'jsquashtest') {
     const result: Record<string, unknown> = { WebAssembly: typeof WebAssembly !== 'undefined' }
     try {
       const { default: decodeJpeg } = await import('@jsquash/jpeg/decode.js')

@@ -1,30 +1,19 @@
-import { mimeForPath } from '../_mime'
-
 interface EdgeContext {
-  request: Request
   env: Record<string, string | undefined>
   params: { path?: string | string[] }
 }
 
 const CORS_HEADERS: Record<string, string> = { 'Access-Control-Allow-Origin': '*' }
 
+// 任意图片类型的代理（imgs 端点）。
+// 目标：https://cnb.cool/<SLUG_IMG>/-/imgs/<path>
+// 原样透传图片字节，不做格式转换/缩放/质量调整。
+//
+// 注：曾尝试用 @jsquash (WASM) 做服务端图像处理，但 EdgeOne 边缘函数
+// 会剥离 query 参数（实测 ?format=webp 等到不了函数），无法接收处理指令。
+// node-function 则不支持 sharp 原生模块。故当前仅原样透传。
 export async function onRequest(context: EdgeContext) {
   const urlPath = context.params.path
-
-  // 临时验证：检查 context.request.url 是否含 query（用 header 返回诊断，不破坏图片输出）
-  const reqUrl = new URL(context.request.url)
-  const queryPresent = reqUrl.search
-  if (queryPresent) {
-    const result = {
-      has_query: true,
-      query: queryPresent,
-      url: reqUrl.pathname,
-      WebAssembly: typeof WebAssembly !== 'undefined',
-    }
-    return new Response(JSON.stringify({ code: 0, data: result }, null, 2), {
-      headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
-    })
-  }
   if (!urlPath) {
     return new Response(JSON.stringify({ error: 'No path provided' }), {
       status: 400,
@@ -49,8 +38,7 @@ export async function onRequest(context: EdgeContext) {
       headers: {
         'Content-Type': response.headers.get('Content-Type') ?? 'image/png',
         'Cache-Control': 'public, max-age=30',
-        // 阻止 SVG 等图片内嵌脚本执行（M1：防存储型 XSS）。SVG 可内嵌 <script>，
-        // 透传 image/svg+xml 后浏览器会渲染执行。CSP 禁止脚本 + 禁止外部资源加载。
+        // 阻止 SVG 等图片内嵌脚本执行（M1：防存储型 XSS）
         'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
         'X-Content-Type-Options': 'nosniff',
         ...CORS_HEADERS,
@@ -63,4 +51,3 @@ export async function onRequest(context: EdgeContext) {
     })
   }
 }
-// force redeploy 1782518721

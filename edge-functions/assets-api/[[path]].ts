@@ -204,9 +204,49 @@ interface AssetRecord {
 
 // ============ TTL 懒删除 ============
 
-// 扫描某 service 的索引，删掉已过期的记录（含 KV 记录 + 索引项）。
-// 返回清理条数。CNB 实际文件不在此清理（边缘无法调 node），留作孤儿（不可达）。
-async function sweepExpired(service: string): Promise<number> {
+// 从 cnbPath（如 /slug/-/imgs|files/ID/uuid.ext）提取 CNB DELETE 需要的子路径。
+// 逻辑与 node 端 _utils.extractImagePath 一致。
+function extractCnbSubPath(cnbPath: string): string {
+  const path = String(cnbPath).split(/[?#]/)[0]
+  const match = path.match(/-\/(?:imgs|files)\/(.+)/)
+  return match ? match[1] : path
+}
+
+// 调 CNB DELETE API 删除实际文件。token/slug 来自 env。
+// 失败不抛（吞掉错误），因为懒删除不应因单个 CNB 删除失败而中断清理其他记录。
+// 返回是否成功。
+async function deleteCnbFile(
+  cnbPath: string,
+  env: Record<string, string | undefined>,
+): Promise<boolean> {
+  const token = env.TOKEN_DELETE
+  const slug = env.SLUG_IMG
+  if (!token || !slug) return false
+  const subPath = extractCnbSubPath(cnbPath)
+  const isImgs = cnbPath.includes('/-/imgs/')
+  const deleteUrl = `https://api.cnb.cool/${slug}/-/${isImgs ? 'imgs' : 'files'}/${subPath}`
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 15000)
+  try {
+    const resp = await fetch(deleteUrl, {
+      method: 'DELETE',
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return resp.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+// 扫描某 service 的索引，删掉已过期的记录（KV 记录 + 索引项 + CNB 实际文件）。
+// 返回清理条数。env 用于调 CNB DELETE（TOKEN_DELETE/SLUG_IMG）。
+async function sweepExpired(
+  service: string,
+  env: Record<string, string | undefined>,
+): Promise<number> {
   const idx = await getIndex(service)
   const now = Date.now()
   const expired: AssetRecord[] = []
@@ -216,12 +256,14 @@ async function sweepExpired(service: string): Promise<number> {
     else keep.push(r)
   }
   if (expired.length === 0) return 0
+  // 删 KV 记录 + CNB 文件（并行，单个失败不影响其他）
   await Promise.all(
-    expired.map((r) =>
-      getKV()
+    expired.map(async (r) => {
+      await getKV()
         .delete(recordKey(r.service, r.key))
-        .catch(() => {}),
-    ),
+        .catch(() => {})
+      if (r.cnbPath) await deleteCnbFile(r.cnbPath, env).catch(() => {})
+    }),
   )
   await setIndex(service, keep)
   return expired.length
@@ -370,8 +412,8 @@ async function handleIndexOp(
         return jsonRes({ code: 1, msg: '缺少 service/key/cnbPath' }, 400)
       }
       await putRecord(rec)
-      // 懒删除：写完后顺手扫该 service 的过期记录（不阻塞响应）
-      await sweepExpired(rec.service).catch(() => {})
+      // 懒删除：写完后顺手扫该 service 的过期记录（含 CNB 文件）
+      await sweepExpired(rec.service, env).catch(() => {})
       return jsonRes({ code: 0, msg: 'ok', data: { service: rec.service, key: rec.key } })
     }
 
@@ -389,8 +431,8 @@ async function handleIndexOp(
 
     if (op === 'list') {
       if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
-      // 懒删除：列举前先清理过期记录（保持索引干净）
-      await sweepExpired(service).catch(() => {})
+      // 懒删除：列举前先清理过期记录（含 CNB 文件，保持索引干净）
+      await sweepExpired(service, env).catch(() => {})
       const prefix = url.searchParams.get('prefix') || ''
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500)
       let items = await getIndex(service)
@@ -430,9 +472,10 @@ async function handleDownload(
     return emptyRes(500)
   }
   if (!rec) return emptyRes(404)
-  // TTL 懒删除：记录已过期 → 删记录 + 返回 404
+  // TTL 懒删除：记录已过期 → 删 KV 记录 + CNB 文件 + 返回 404
   if (rec.expiresAt && new Date(rec.expiresAt).getTime() < Date.now()) {
     await removeRecord(service, keyPath).catch(() => {})
+    if (rec.cnbPath) await deleteCnbFile(rec.cnbPath, env).catch(() => {})
     return emptyRes(404)
   }
 

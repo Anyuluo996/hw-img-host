@@ -546,8 +546,12 @@ async function handleIndexOp(
       const subOp = url.searchParams.get('rebuild') === '1'
       if (subOp) {
         if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
-        const r = await rebuildAssetIndex(service)
-        return jsonRes({ code: 0, msg: '聚合索引已重建', data: r })
+        try {
+          const r = await rebuildAssetIndex(service)
+          return jsonRes({ code: 0, msg: '聚合索引已重建', data: r })
+        } catch (e) {
+          return jsonRes({ code: 1, msg: '重建失败: ' + (e as Error).message }, 500)
+        }
       }
       const rec = (await req.json()) as AssetRecord
       if (!rec.service || !rec.key || !rec.cnbPath) {

@@ -285,12 +285,14 @@ router.post('/upload', authGate, async (req: AssetReq, res) => {
     }
 
     const data = result.data as { url: string | null }
-    return res.json(
-      reply(0, 'ok', {
-        ...data,
-        url: data.url, // 顶层镜像 data.url，兼容部分 PicGo 插件
-      }),
-    )
+    // PicGo 兼容：除 data.url 外，根级补 url（部分插件只取顶层 url 字段）。
+    // 这里不走 reply()，因为 reply 把所有数据包进 data，出不来真正的顶层字段。
+    return res.json({
+      code: 0,
+      msg: 'ok',
+      url: data.url, // 顶层 url（兼容简陋插件）
+      data,
+    })
   } catch (e) {
     console.error('assets /upload 失败:', (e as Error).message)
     return res.status(500).json(reply(1, '上传失败'))

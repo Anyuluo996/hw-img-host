@@ -34,6 +34,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/assets-keys',
+      name: 'assets-keys',
+      component: () => import('../views/AssetsKeysView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       // 秘密登录路径，不主动暴露。
       path: LOGIN_PATH,
       name: 'login',

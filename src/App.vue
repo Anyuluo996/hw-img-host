@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RouterView, useRouter, useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
-import { Upload, Image, LogOut, Tag } from 'lucide-vue-next'
+import { Upload, Image, LogOut, Tag, KeyRound } from 'lucide-vue-next'
 
 const router = useRouter()
 const route = useRoute()
@@ -56,6 +56,18 @@ function handleLogout() {
           >
             <Tag class="h-3.5 w-3.5" />
             标签
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition"
+            :class="
+              route.name === 'assets-keys'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground'
+            "
+            @click="router.push('/assets-keys')"
+          >
+            <KeyRound class="h-3.5 w-3.5" />
+            密钥
           </button>
         </div>
         <button

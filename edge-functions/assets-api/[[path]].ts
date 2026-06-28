@@ -131,15 +131,15 @@ function safeEqualStr(a: string, b: string): boolean {
 }
 
 // 从请求校验 X-API-Key，返回绑定的 service。失败返回 null。
-function checkApiKey(req: Request, env: Record<string, string | undefined>): string | null {
-  const keys = parseKeys(env.ASSETS_KEYS)
-  if (keys.size === 0) return null // fail-closed
+// 两级查询：KV 密钥库优先 → 环境变量 ASSETS_KEYS fallback。
+async function checkApiKey(
+  req: Request,
+  env: Record<string, string | undefined>,
+): Promise<string | null> {
+  // fail-closed：KV 不可用且环境变量未配置时拒绝
   const provided = req.headers.get('x-api-key')
   if (!provided) return null
-  for (const [knownKey, service] of keys) {
-    if (safeEqualStr(provided, knownKey)) return service
-  }
-  return null
+  return resolveService(provided, env)
 }
 
 // ============ 索引操作（JWT 鉴权，node 内部调用）============
@@ -199,6 +199,107 @@ interface AssetRecord {
   size?: number
   mime?: string
   createdAt?: string
+  expiresAt?: string | null // ISO 时间戳；null/缺省=永不过期。懒删除据此清理
+}
+
+// ============ TTL 懒删除 ============
+
+// 扫描某 service 的索引，删掉已过期的记录（含 KV 记录 + 索引项）。
+// 返回清理条数。CNB 实际文件不在此清理（边缘无法调 node），留作孤儿（不可达）。
+async function sweepExpired(service: string): Promise<number> {
+  const idx = await getIndex(service)
+  const now = Date.now()
+  const expired: AssetRecord[] = []
+  const keep: AssetRecord[] = []
+  for (const r of idx) {
+    if (r.expiresAt && new Date(r.expiresAt).getTime() < now) expired.push(r)
+    else keep.push(r)
+  }
+  if (expired.length === 0) return 0
+  await Promise.all(
+    expired.map((r) =>
+      getKV()
+        .delete(recordKey(r.service, r.key))
+        .catch(() => {}),
+    ),
+  )
+  await setIndex(service, keep)
+  return expired.length
+}
+
+// ============ 密钥管理（KV 存储，页面增删即时生效）============
+//
+// 密钥命名空间（与 asset_*/aidx_* 分离）：
+//   ak_{name}     单个密钥记录（name = service 名）
+//   akidx_all     全部密钥的聚合数组（列举/校验用）
+
+interface KeyRecord {
+  name: string // = service 名，授权命名空间
+  key: string // 明文密钥，k_ 前缀
+  note?: string // 可选备注
+  createdAt?: string
+}
+
+function keyRecordKey(name: string): string {
+  return `ak_${name}`
+}
+
+const KEY_INDEX = 'akidx_all'
+
+async function getKeyIndex(): Promise<KeyRecord[]> {
+  const v = (await getKV().get(KEY_INDEX, 'json')) as KeyRecord[] | null
+  return Array.isArray(v) ? v : []
+}
+
+async function setKeyIndex(items: KeyRecord[]): Promise<void> {
+  await getKV().put(KEY_INDEX, JSON.stringify(items))
+}
+
+async function findKeyByName(name: string): Promise<KeyRecord | null> {
+  const v = (await getKV().get(keyRecordKey(name), 'json')) as KeyRecord | null
+  return v || null
+}
+
+async function putKey(rec: KeyRecord): Promise<void> {
+  await getKV().put(keyRecordKey(rec.name), JSON.stringify(rec))
+  const idx = await getKeyIndex()
+  const i = idx.findIndex((it) => it.name === rec.name)
+  if (i >= 0) idx[i] = rec
+  else idx.push(rec)
+  await setKeyIndex(idx)
+}
+
+async function removeKey(name: string): Promise<boolean> {
+  const exists = await findKeyByName(name)
+  if (!exists) return false
+  await getKV().delete(keyRecordKey(name))
+  const idx = await getKeyIndex()
+  await setKeyIndex(idx.filter((it) => it.name !== name))
+  return true
+}
+
+// 校验 X-API-Key：先查 KV 密钥库，再 fallback 到环境变量 ASSETS_KEYS。
+// 返回绑定的 service（密钥 name）。失败返回 null。timing-safe 比较。
+async function resolveService(
+  provided: string,
+  env: Record<string, string | undefined>,
+): Promise<string | null> {
+  if (!provided) return null
+  // 1. KV 密钥库
+  try {
+    const idx = await getKeyIndex()
+    for (const kr of idx) {
+      if (safeEqualStr(provided, kr.key)) return kr.name
+    }
+  } catch {
+    /* 落到 fallback */
+  }
+  // 2. 环境变量 fallback（兼容已部署的 ASSETS_KEYS）
+  const envKeys = parseKeys(env.ASSETS_KEYS)
+  for (const [knownKey, service] of envKeys) {
+    if (safeEqualStr(provided, knownKey)) return service
+  }
+  return null
 }
 
 // ============ 主入口 ============
@@ -211,7 +312,7 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       headers: {
-        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-API-Key',
         'Access-Control-Allow-Origin': '*',
       },
@@ -228,6 +329,11 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
   const first = pathSegs[0] || ''
   if (first === 'index' || first === 'check' || first === 'list') {
     return handleIndexOp(req, env, first)
+  }
+
+  // 密钥管理子路由：keys / resolve-service（JWT 鉴权，node 内部调用）
+  if (first === 'keys' || first === 'resolve-service') {
+    return handleKeysOp(req, env, first, pathSegs.slice(1))
   }
 
   // 否则视为私有下载：/{service}/{key...}
@@ -264,6 +370,8 @@ async function handleIndexOp(
         return jsonRes({ code: 1, msg: '缺少 service/key/cnbPath' }, 400)
       }
       await putRecord(rec)
+      // 懒删除：写完后顺手扫该 service 的过期记录（不阻塞响应）
+      await sweepExpired(rec.service).catch(() => {})
       return jsonRes({ code: 0, msg: 'ok', data: { service: rec.service, key: rec.key } })
     }
 
@@ -281,9 +389,14 @@ async function handleIndexOp(
 
     if (op === 'list') {
       if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
+      // 懒删除：列举前先清理过期记录（保持索引干净）
+      await sweepExpired(service).catch(() => {})
       const prefix = url.searchParams.get('prefix') || ''
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500)
       let items = await getIndex(service)
+      // 双保险：再过滤一次已过期（防止 sweep 与 list 间的竞态）
+      const now = Date.now()
+      items = items.filter((it) => !it.expiresAt || new Date(it.expiresAt).getTime() >= now)
       if (prefix) items = items.filter((it) => it.key.startsWith(prefix))
       items = items.slice(0, limit)
       return jsonRes({ code: 0, msg: 'ok', data: { items, total: items.length } })
@@ -302,7 +415,7 @@ async function handleDownload(
   env: Record<string, string | undefined>,
   pathSegs: string[],
 ): Promise<Response> {
-  const service = checkApiKey(req, env)
+  const service = await checkApiKey(req, env)
   if (!service) return emptyRes(401)
 
   const pathService = pathSegs[0]
@@ -317,6 +430,11 @@ async function handleDownload(
     return emptyRes(500)
   }
   if (!rec) return emptyRes(404)
+  // TTL 懒删除：记录已过期 → 删记录 + 返回 404
+  if (rec.expiresAt && new Date(rec.expiresAt).getTime() < Date.now()) {
+    await removeRecord(service, keyPath).catch(() => {})
+    return emptyRes(404)
+  }
 
   const slug = env.SLUG_IMG
   if (!slug) return emptyRes(500)
@@ -358,5 +476,91 @@ async function handleDownload(
     return new Response(upstream.body, { status: upstream.status, headers: respHeaders })
   } catch {
     return emptyRes(502)
+  }
+}
+
+// ============ 密钥管理（JWT 鉴权，node 路由调用）============
+//
+// GET    /assets-api/keys                列举所有密钥（node 脱敏后给前端）
+// POST   /assets-api/keys                创建密钥 {name, note, key}（key 由 node 生成传入）
+// DELETE /assets-api/keys?name=          删除密钥
+// PUT    /assets-api/keys?name=          更新（轮换 key / 改 note）{key?, note?}
+// POST   /assets-api/resolve-service     {key} → {service}（node 消费鉴权用）
+
+async function handleKeysOp(
+  req: Request,
+  env: Record<string, string | undefined>,
+  op: string,
+  _subSegs: string[],
+): Promise<Response> {
+  // JWT 鉴权
+  const authHeader = req.headers.get('Authorization')
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return emptyRes(401)
+  const secret = env.JWT_SECRET || env.UPLOAD_PASSWORD
+  if (!secret) return emptyRes(500)
+  const ok = await verifyJwt(authHeader.slice(7), secret)
+  if (!ok) return emptyRes(401)
+
+  const url = new URL(req.url)
+
+  try {
+    // node 消费鉴权：传入 key，返回 service（或 null）
+    if (op === 'resolve-service' && req.method === 'POST') {
+      const body = (await req.json()) as { key?: string }
+      if (!body.key) return jsonRes({ code: 1, msg: '缺少 key' }, 400)
+      const service = await resolveService(body.key, env)
+      return jsonRes({ code: 0, msg: 'ok', data: { service } })
+    }
+
+    if (op === 'keys' && req.method === 'GET') {
+      const idx = await getKeyIndex()
+      return jsonRes({ code: 0, msg: 'ok', data: { keys: idx } })
+    }
+
+    if (op === 'keys' && req.method === 'POST') {
+      const body = (await req.json()) as KeyRecord
+      if (!body.name || !body.key) return jsonRes({ code: 1, msg: '缺少 name/key' }, 400)
+      // name 仅允许字母数字下划线横线（防 KV key 注入）
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(body.name)) {
+        return jsonRes({ code: 1, msg: 'name 仅允许字母数字、下划线、横线（1-64 位）' }, 400)
+      }
+      if (await findKeyByName(body.name)) {
+        return jsonRes({ code: 1, msg: 'name 已存在' }, 409)
+      }
+      const rec: KeyRecord = {
+        name: body.name,
+        key: body.key,
+        note: body.note || '',
+        createdAt: new Date().toISOString(),
+      }
+      await putKey(rec)
+      return jsonRes({ code: 0, msg: 'ok', data: rec })
+    }
+
+    if (op === 'keys' && req.method === 'PUT') {
+      const name = (url.searchParams.get('name') || '').trim()
+      if (!name) return jsonRes({ code: 1, msg: '缺少 name' }, 400)
+      const old = await findKeyByName(name)
+      if (!old) return jsonRes({ code: 1, msg: '密钥不存在' }, 404)
+      const body = (await req.json()) as { key?: string; note?: string }
+      const updated: KeyRecord = {
+        ...old,
+        key: body.key || old.key,
+        note: body.note !== undefined ? body.note : old.note,
+      }
+      await putKey(updated)
+      return jsonRes({ code: 0, msg: 'ok', data: updated })
+    }
+
+    if (op === 'keys' && req.method === 'DELETE') {
+      const name = (url.searchParams.get('name') || '').trim()
+      if (!name) return jsonRes({ code: 1, msg: '缺少 name' }, 400)
+      const removed = await removeKey(name)
+      return jsonRes({ code: 0, msg: removed ? 'ok' : 'not found', data: { removed } })
+    }
+
+    return emptyRes(404)
+  } catch {
+    return jsonRes({ code: 1, msg: '密钥操作失败' }, 500)
   }
 }

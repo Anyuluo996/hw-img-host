@@ -61,10 +61,10 @@ function expressRawBody(req: AssetReq, res: Response, next: NextFunction) {
   })
 }
 
-// 鉴权中间件：校验 X-API-Key，把 service 挂到 req 上供后续授权用。
+// 鉴权中间件：校验 X-API-Key（异步，走 edge 反查 service），挂到 req 上供后续授权用。
 // 任何失败一律 401 空响应（零信息泄露）。
-function authGate(req: AssetReq, res: Response, next: NextFunction) {
-  const service = checkApiKey(req)
+async function authGate(req: AssetReq, res: Response, next: NextFunction) {
+  const service = await checkApiKey(req)
   if (!service) return deny(res, 401)
   req.callerService = service
   next()
@@ -94,6 +94,23 @@ function sanitizeKeySegments(segs: string[]): string[] {
         .slice(0, 200),
     )
     .filter(Boolean)
+}
+
+// TTL 参数解析。支持 ?ttl=24h / 2d / 1w / 0(永不过期)。
+// 不传 = 默认 1 天。返回过期时刻的 ISO 字符串，或 null 表示永不过期。
+function parseTtl(ttlRaw: string | undefined): string | null {
+  if (ttlRaw === undefined || ttlRaw === '') {
+    // 默认 1 天
+    return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+  }
+  const trimmed = String(ttlRaw).trim()
+  if (trimmed === '0') return null // 永不过期
+  const m = trimmed.match(/^(\d+)\s*(h|d|w)$/i)
+  if (!m) return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 无效格式回退默认 1 天
+  const n = parseInt(m[1], 10)
+  const unit = m[2].toLowerCase()
+  const ms = unit === 'h' ? n * 3600_000 : unit === 'd' ? n * 86_400_000 : n * 7 * 86_400_000
+  return new Date(Date.now() + ms).toISOString()
 }
 
 // 调用边缘 assets-api 做 KV 索引读写（node 无法直接访问 img_kv 绑定）。
@@ -145,7 +162,15 @@ router.put('/*splat', authGate, async (req: AssetReq, res) => {
       }
     }
 
-    return await doUpload(req, res, service, fileKey)
+    return await doUpload(
+      req,
+      res,
+      service,
+      fileKey,
+      false,
+      undefined,
+      parseTtl(req.query.ttl as string),
+    )
   } catch (e) {
     console.error('assets PUT 失败:', (e as Error).message)
     return res.status(500).json(reply(1, '上传失败'))
@@ -153,7 +178,7 @@ router.put('/*splat', authGate, async (req: AssetReq, res) => {
 })
 
 // ============ POST /  服务端生成 key 上传 ============
-// ?name=原始文件名.ext  &public=0|1
+// ?name=原始文件名.ext  &public=0|1  &ttl=24h|2d|1w|0
 router.post('/', authGate, async (req: AssetReq, res) => {
   try {
     const service = req.callerService!
@@ -171,7 +196,15 @@ router.post('/', authGate, async (req: AssetReq, res) => {
     const ext = extMatch ? extMatch[1] : 'bin'
     const fileKey = `${stem}-${stamp}-${hash}.${ext}`
 
-    return await doUpload(req, res, service, fileKey, isPublic, name)
+    return await doUpload(
+      req,
+      res,
+      service,
+      fileKey,
+      isPublic,
+      name,
+      parseTtl(req.query.ttl as string),
+    )
   } catch (e) {
     console.error('assets POST 失败:', (e as Error).message)
     return res.status(500).json(reply(1, '上传失败'))
@@ -186,6 +219,7 @@ async function doUpload(
   fileKey: string,
   isPublic = false,
   displayName?: string,
+  expiresAt: string | null = null,
 ) {
   const buffer = req.fileBuffer!
   const fileName = displayName || fileKey.split('/').pop() || fileKey
@@ -213,6 +247,7 @@ async function doUpload(
     size: buffer.length,
     mime: (req.headers['content-type'] as string) || 'application/octet-stream',
     createdAt: new Date().toISOString(),
+    expiresAt, // TTL 过期时刻（ISO）或 null（永不过期）。懒删除据此清理
   }
   const idxRes = await callAssetsEdge('/index', {
     method: 'POST',
@@ -232,6 +267,7 @@ async function doUpload(
       public: isPublic,
       size: buffer.length,
       hash,
+      expiresAt,
     }),
   )
 }

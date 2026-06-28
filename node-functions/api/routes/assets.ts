@@ -72,11 +72,13 @@ function authGate(req: AssetReq, res: Response, next: NextFunction) {
 
 router.use(expressRawBody)
 
-// 路径通配段（来自 router 匹配 /api/assets/*）解析为 [service, ...keyParts]。
+// 路径通配段（来自 router 匹配 /api/assets/*splat）解析为 [service, ...keyParts]。
 // key 可含 / 分层。形如 koishi/ocr/001.jpg → ["koishi","ocr","001.jpg"]
-function splitKeyPath(wildcard: string | undefined): string[] {
+// path-to-regexp v8 在多段路径下可能返回 string 或 string[]，两者都兼容。
+function splitKeyPath(wildcard: string | string[] | undefined): string[] {
   if (!wildcard) return []
-  return wildcard
+  const raw = Array.isArray(wildcard) ? wildcard.join('/') : wildcard
+  return raw
     .split('/')
     .map((s) => decodeURIComponent(s))
     .filter((s) => s.length > 0)
@@ -116,9 +118,11 @@ async function callAssetsEdge(path: string, init: RequestInit): Promise<globalTh
 }
 
 // ============ PUT /:service/:key+  指定 key 上传（冲突 409） ============
-router.put('/*', authGate, async (req: AssetReq, res) => {
+// Express 5 用 path-to-regexp v8，裸 /* 通配不再合法，必须命名：'/*splat'。
+router.put('/*splat', authGate, async (req: AssetReq, res) => {
   try {
-    const segs = sanitizeKeySegments(splitKeyPath(req.params[0]))
+    const splat = (req.params as { splat?: string | string[] }).splat
+    const segs = sanitizeKeySegments(splitKeyPath(splat))
     if (segs.length < 2) return deny(res, 400)
     const service = segs[0]
     const fileKey = segs.slice(1).join('/')
@@ -254,9 +258,10 @@ router.get('/', authGate, async (req: AssetReq, res) => {
 })
 
 // ============ DELETE /:service/:key+  删除 ============
-router.delete('/*', authGate, async (req: AssetReq, res) => {
+router.delete('/*splat', authGate, async (req: AssetReq, res) => {
   try {
-    const segs = splitKeyPath(req.params[0])
+    const splat = (req.params as { splat?: string | string[] }).splat
+    const segs = splitKeyPath(splat)
     if (segs.length < 2) return deny(res, 400)
     const service = segs[0]
     if (service !== req.callerService) return deny(res, 403)

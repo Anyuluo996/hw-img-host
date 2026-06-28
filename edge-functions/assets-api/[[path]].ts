@@ -154,13 +154,36 @@ function indexKey(service: string): string {
   return `aidx_${service}`
 }
 
-async function getIndex(service: string): Promise<AssetRecord[]> {
-  const v = (await getKV().get(indexKey(service), 'json')) as AssetRecord[] | null
-  return Array.isArray(v) ? v : []
+// 索引状态：版本号 + 记录数组。ver 用于乐观并发检测（读改写重试）。
+// 旧索引（裸数组）在 getIndexState 里自动迁移，向后兼容存量数据。
+interface IndexState {
+  ver: number
+  items: AssetRecord[]
 }
 
-async function setIndex(service: string, items: AssetRecord[]): Promise<void> {
-  await getKV().put(indexKey(service), JSON.stringify(items))
+// 读取索引状态。兼容两种存量格式：
+//  - 旧裸数组 AssetRecord[]  → 迁移为 { ver: Date.now(), items }
+//  - 新对象 { ver, items }    → 原样返回
+//  - null/异常                → 空状态（ver 用当前时间，确保首次写入有区分度）
+async function getIndexState(service: string): Promise<IndexState> {
+  const v = await getKV().get(indexKey(service), 'json').catch(() => null)
+  if (Array.isArray(v)) {
+    // 旧裸数组格式 → 自动迁移
+    return { ver: Date.now(), items: v as AssetRecord[] }
+  }
+  if (v && typeof v === 'object' && Array.isArray((v as IndexState).items)) {
+    return v as IndexState
+  }
+  return { ver: 0, items: [] }
+}
+
+async function setIndexState(service: string, state: IndexState): Promise<void> {
+  await getKV().put(indexKey(service), JSON.stringify(state))
+}
+
+// 保留旧名（只读路径用）：返回 items 数组。
+async function getIndex(service: string): Promise<AssetRecord[]> {
+  return (await getIndexState(service)).items
 }
 
 async function findRecord(service: string, key: string): Promise<AssetRecord | null> {
@@ -168,24 +191,93 @@ async function findRecord(service: string, key: string): Promise<AssetRecord | n
   return v || null
 }
 
+// ============ 乐观并发：版本号 + 重试 ============
+//
+// KV 是最终一致（<60s），无 CAS/条件写。纯互斥锁本身也会竞态（两个并发请求
+// 可能同时拿到同一把"锁"）。这里用「读 → 改 → 重读校验 ver → 写」三步：
+//   1. 读出 (ver0, items0)
+//   2. fn 在内存里算出 next
+//   3. 再读一次：若 ver 仍是 ver0 → 写回 (ver0+1, next)；否则说明期间有人写过，重试
+// 重试上限 3 次，仍冲突则抛错（极端竞态，交给兜底重建自愈）。
+// 注意：最终一致窗口内仍可能两人读到同一 ver0，此时版本号挡不住，
+//       所以列表端点另有 rebuildAssetIndex 兜底（见 list 处理）。
+async function mutateIndex<T>(
+  service: string,
+  fn: (items: AssetRecord[]) => { items: AssetRecord[]; result: T },
+): Promise<T> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const state = await getIndexState(service)
+    const { items: next, result } = fn(state.items)
+    // 写前重读校验 ver：变了就放弃本次改动重读
+    const fresh = await getIndexState(service)
+    if (fresh.ver !== state.ver) continue
+    await setIndexState(service, { ver: state.ver + 1, items: next })
+    return result
+  }
+  throw new Error('index 写冲突，重试耗尽')
+}
+
 async function putRecord(rec: AssetRecord): Promise<void> {
   await getKV().put(recordKey(rec.service, rec.key), JSON.stringify(rec))
-  // 维护聚合索引
-  const idx = await getIndex(rec.service)
-  const i = idx.findIndex((it) => it.service === rec.service && it.key === rec.key)
-  if (i >= 0) idx[i] = rec
-  else idx.push(rec)
-  await setIndex(rec.service, idx)
+  // 维护聚合索引（乐观并发）
+  await mutateIndex(rec.service, (items) => {
+    const i = items.findIndex((it) => it.service === rec.service && it.key === rec.key)
+    if (i >= 0) items[i] = rec
+    else items.push(rec)
+    return { items: [...items], result: undefined }
+  })
 }
 
 async function removeRecord(service: string, key: string): Promise<boolean> {
   const exists = await findRecord(service, key)
   if (!exists) return false
   await getKV().delete(recordKey(service, key))
-  const idx = await getIndex(service)
-  const next = idx.filter((it) => !(it.service === service && it.key === key))
-  await setIndex(service, next)
-  return true
+  return mutateIndex(service, (items) => {
+    const next = items.filter((it) => !(it.service === service && it.key === key))
+    return { items: next, result: next.length !== items.length }
+  })
+}
+
+// 从每条独立 KV 记录重建某 service 的聚合索引（真相源 → 缓存）。
+// 用于：① 首次升级的存量迁移；② 极端竞态后的自愈；③ 手动清理残留。
+// 翻页 list({prefix:'asset_'+service}) → 批量 get → 过滤已过期 → 覆盖式写回（高 ver）。
+// 与 kv-api.rebuildIndex 同构。
+async function rebuildAssetIndex(service: string): Promise<{ total: number }> {
+  const kv = getKV()
+  const prefix = `asset_${service}_`
+  const allKeys: string[] = []
+  let cursor: string | undefined
+  let guard = 0
+  do {
+    if (guard++ > 50) break // 防无限翻页
+    const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 256 }
+    if (cursor) opts.cursor = cursor
+    const result = await kv.list(opts)
+    const names = result.keys.map((k) => (k.name || k.key) as string).filter(Boolean)
+    allKeys.push(...names)
+    cursor = result.complete ? undefined : result.cursor
+  } while (cursor)
+
+  const now = Date.now()
+  const items = await Promise.all(
+    allKeys.map(async (k) => {
+      try {
+        const v = (await kv.get(k, 'json')) as AssetRecord | null
+        return v || null
+      } catch {
+        return null
+      }
+    }),
+  )
+  const live = items.filter((it): it is AssetRecord => {
+    if (!it) return false
+    // 重建时顺手清掉已过期记录（与懒删除一致）
+    if (it.expiresAt && new Date(it.expiresAt).getTime() < now) return false
+    return true
+  })
+  // 高 ver 写回，压过任何并发旧写
+  await setIndexState(service, { ver: Date.now(), items: live })
+  return { total: live.length }
 }
 
 interface AssetRecord {
@@ -243,18 +335,17 @@ async function deleteCnbFile(
 
 // 扫描某 service 的索引，删掉已过期的记录（KV 记录 + 索引项 + CNB 实际文件）。
 // 返回清理条数。env 用于调 CNB DELETE（TOKEN_DELETE/SLUG_IMG）。
+// 索引项的删除走 mutateIndex（乐观并发）；KV 记录与 CNB 文件删除作为副作用并行执行。
 async function sweepExpired(
   service: string,
   env: Record<string, string | undefined>,
 ): Promise<number> {
-  const idx = await getIndex(service)
   const now = Date.now()
-  const expired: AssetRecord[] = []
-  const keep: AssetRecord[] = []
-  for (const r of idx) {
-    if (r.expiresAt && new Date(r.expiresAt).getTime() < now) expired.push(r)
-    else keep.push(r)
-  }
+  // 先读一次挑出过期项（用于副作用删除）
+  const state = await getIndexState(service)
+  const expired = state.items.filter(
+    (r) => r.expiresAt && new Date(r.expiresAt).getTime() < now,
+  )
   if (expired.length === 0) return 0
   // 删 KV 记录 + CNB 文件（并行，单个失败不影响其他）
   await Promise.all(
@@ -265,7 +356,17 @@ async function sweepExpired(
       if (r.cnbPath) await deleteCnbFile(r.cnbPath, env).catch(() => {})
     }),
   )
-  await setIndex(service, keep)
+  // 从索引移除过期项（乐观并发）
+  try {
+    await mutateIndex(service, (items) => {
+      const next = items.filter(
+        (it) => !(it.expiresAt && new Date(it.expiresAt).getTime() < now),
+      )
+      return { items: next, result: undefined }
+    })
+  } catch {
+    // 索引写冲突：实际 KV 记录已删，索引会在下次 rebuild 自愈，不阻塞流程
+  }
   return expired.length
 }
 
@@ -285,15 +386,48 @@ interface KeyRecord {
   createdAt?: string
 }
 
-const KEY_INDEX = 'akidx_all'
-
-async function getKeyIndex(): Promise<KeyRecord[]> {
-  const v = (await getKV().get(KEY_INDEX, 'json')) as KeyRecord[] | null
-  return Array.isArray(v) ? v : []
+// 密钥索引状态：版本号 + 数组（与 asset 索引同一套乐观并发机制）。
+interface KeyIndexState {
+  ver: number
+  items: KeyRecord[]
 }
 
-async function setKeyIndex(items: KeyRecord[]): Promise<void> {
-  await getKV().put(KEY_INDEX, JSON.stringify(items))
+const KEY_INDEX = 'akidx_all'
+
+async function getKeyIndexState(): Promise<KeyIndexState> {
+  const v = await getKV().get(KEY_INDEX, 'json').catch(() => null)
+  if (Array.isArray(v)) {
+    // 旧裸数组格式 → 自动迁移
+    return { ver: Date.now(), items: v as KeyRecord[] }
+  }
+  if (v && typeof v === 'object' && Array.isArray((v as KeyIndexState).items)) {
+    return v as KeyIndexState
+  }
+  return { ver: 0, items: [] }
+}
+
+async function setKeyIndexState(state: KeyIndexState): Promise<void> {
+  await getKV().put(KEY_INDEX, JSON.stringify(state))
+}
+
+// 保留旧名（只读路径用）：返回 items 数组。
+async function getKeyIndex(): Promise<KeyRecord[]> {
+  return (await getKeyIndexState()).items
+}
+
+// 密钥索引的乐观并发读改写（与 mutateIndex 同构）。
+async function mutateKeyIndex<T>(
+  fn: (items: KeyRecord[]) => { items: KeyRecord[]; result: T },
+): Promise<T> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const state = await getKeyIndexState()
+    const { items: next, result } = fn(state.items)
+    const fresh = await getKeyIndexState()
+    if (fresh.ver !== state.ver) continue
+    await setKeyIndexState({ ver: state.ver + 1, items: next })
+    return result
+  }
+  throw new Error('key index 写冲突，重试耗尽')
 }
 
 // 在索引里按 name 查找。索引是唯一真相源。
@@ -302,22 +436,22 @@ async function findKeyByName(name: string): Promise<KeyRecord | null> {
   return idx.find((it) => it.name === name) || null
 }
 
-// 写入/更新：直接更新索引数组中的对应项。
+// 写入/更新：直接更新索引数组中的对应项（乐观并发）。
 async function putKey(rec: KeyRecord): Promise<void> {
-  const idx = await getKeyIndex()
-  const i = idx.findIndex((it) => it.name === rec.name)
-  if (i >= 0) idx[i] = rec
-  else idx.push(rec)
-  await setKeyIndex(idx)
+  await mutateKeyIndex((items) => {
+    const i = items.findIndex((it) => it.name === rec.name)
+    if (i >= 0) items[i] = rec
+    else items.push(rec)
+    return { items: [...items], result: undefined }
+  })
 }
 
 async function removeKey(name: string): Promise<boolean> {
-  const idx = await getKeyIndex()
-  const before = idx.length
-  const next = idx.filter((it) => it.name !== name)
-  if (next.length === before) return false
-  await setKeyIndex(next)
-  return true
+  return mutateKeyIndex((items) => {
+    const before = items.length
+    const next = items.filter((it) => it.name !== name)
+    return { items: next, result: next.length !== before }
+  })
 }
 
 // 校验 X-API-Key：先查 KV 密钥库，再 fallback 到环境变量 ASSETS_KEYS。
@@ -407,6 +541,14 @@ async function handleIndexOp(
 
   try {
     if (op === 'index' && req.method === 'POST') {
+      // 子路由 POST /assets-api/index/rebuild?service= — 手动重建某 service 聚合索引
+      // （从每条独立记录扫描真相源，覆盖式写回）。用于清理竞态残留 / 存量迁移。
+      const subOp = url.searchParams.get('rebuild') === '1'
+      if (subOp) {
+        if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
+        const r = await rebuildAssetIndex(service)
+        return jsonRes({ code: 0, msg: '聚合索引已重建', data: r })
+      }
       const rec = (await req.json()) as AssetRecord
       if (!rec.service || !rec.key || !rec.cnbPath) {
         return jsonRes({ code: 1, msg: '缺少 service/key/cnbPath' }, 400)
@@ -435,6 +577,12 @@ async function handleIndexOp(
       await sweepExpired(service, env).catch(() => {})
       const prefix = url.searchParams.get('prefix') || ''
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500)
+      // 兜底自愈：随机 1/20 概率从真相源重建索引。
+      // 版本号+重试挡不住最终一致窗口内的极端竞态，重建保证最终一致。
+      // 低频中转场景下 ~5% 请求多花 ~1.5s，可接受。
+      if (Math.floor(Math.random() * 20) === 0) {
+        await rebuildAssetIndex(service).catch(() => {})
+      }
       let items = await getIndex(service)
       // 双保险：再过滤一次已过期（防止 sweep 与 list 间的竞态）
       const now = Date.now()

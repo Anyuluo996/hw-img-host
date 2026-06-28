@@ -242,6 +242,34 @@ async function removeRecord(service: string, key: string): Promise<boolean> {
 // 用于：① 首次升级的存量迁移；② 极端竞态后的自愈；③ 手动清理残留。
 // 翻页 list({prefix:'asset_'+service}) → 批量 get → 过滤已过期 → 覆盖式写回（高 ver）。
 // 与 kv-api.rebuildIndex 同构。
+// 稳健解析 kv.list() 返回值里的 key 名数组 + 分页游标。
+// EdgeOne 运行时实际返回 { complete, cursor, keys:[{key, ...}] }（字段名是 key 不是 name），
+// 但不同版本/路径下可能形态不一（裸数组、keys 缺失等）。本函数兼容所有形态，
+// 逻辑与 kv-api/_helpers.extractKeys 一致（该文件无法跨目录 import）。
+function extractKeyNames(result: unknown): { names: string[]; complete: boolean; cursor?: string } {
+  if (!result) return { names: [], complete: true }
+  // 情况1: { keys: [...] }
+  if (Array.isArray((result as { keys?: unknown }).keys)) {
+    const r = result as { keys: unknown[]; complete?: boolean; cursor?: string }
+    const names = r.keys.map((k) => {
+      if (typeof k === 'string') return k
+      const obj = k as { key?: string; name?: string }
+      return obj.key || obj.name || ''
+    })
+    return { names: names.filter(Boolean), complete: r.complete !== false, cursor: r.cursor }
+  }
+  // 情况2: 直接是数组
+  if (Array.isArray(result)) {
+    const names = result.map((k) => {
+      if (typeof k === 'string') return k
+      const obj = k as { key?: string; name?: string }
+      return obj.key || obj.name || ''
+    })
+    return { names: names.filter(Boolean), complete: true }
+  }
+  return { names: [], complete: true }
+}
+
 async function rebuildAssetIndex(service: string): Promise<{ total: number }> {
   const kv = getKV()
   const prefix = `asset_${service}_`
@@ -253,9 +281,9 @@ async function rebuildAssetIndex(service: string): Promise<{ total: number }> {
     const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 256 }
     if (cursor) opts.cursor = cursor
     const result = await kv.list(opts)
-    const names = result.keys.map((k) => (k.name || k.key) as string).filter(Boolean)
-    allKeys.push(...names)
-    cursor = result.complete ? undefined : result.cursor
+    const parsed = extractKeyNames(result)
+    allKeys.push(...parsed.names)
+    cursor = parsed.complete ? undefined : parsed.cursor
   } while (cursor)
 
   const now = Date.now()
@@ -546,6 +574,7 @@ async function handleIndexOp(
       const subOp = url.searchParams.get('rebuild') === '1'
       if (subOp) {
         if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
+        // 重建单独 catch：暴露真实错误，便于运维定位（外层 catch 会吞成"索引操作失败"）
         try {
           const r = await rebuildAssetIndex(service)
           return jsonRes({ code: 0, msg: '聚合索引已重建', data: r })

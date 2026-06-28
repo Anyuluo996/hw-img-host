@@ -230,18 +230,17 @@ async function sweepExpired(service: string): Promise<number> {
 // ============ 密钥管理（KV 存储，页面增删即时生效）============
 //
 // 密钥命名空间（与 asset_*/aidx_* 分离）：
-//   ak_{name}     单个密钥记录（name = service 名）
-//   akidx_all     全部密钥的聚合数组（列举/校验用）
+//   akidx_all     全部密钥的聚合数组（唯一真相源）
+//
+// 设计说明：只用单 key 聚合数组，不维护 ak_{name} 单条记录。
+// 原因：KV 是最终一致（<60s），单条与索引双写会出现写后读不一致，
+// 导致"轮换后删不掉"（findKeyByName 读单条返回 null）。以索引为唯一真相源可彻底避免。
 
 interface KeyRecord {
   name: string // = service 名，授权命名空间
   key: string // 明文密钥，k_ 前缀
   note?: string // 可选备注
   createdAt?: string
-}
-
-function keyRecordKey(name: string): string {
-  return `ak_${name}`
 }
 
 const KEY_INDEX = 'akidx_all'
@@ -255,13 +254,14 @@ async function setKeyIndex(items: KeyRecord[]): Promise<void> {
   await getKV().put(KEY_INDEX, JSON.stringify(items))
 }
 
+// 在索引里按 name 查找。索引是唯一真相源。
 async function findKeyByName(name: string): Promise<KeyRecord | null> {
-  const v = (await getKV().get(keyRecordKey(name), 'json')) as KeyRecord | null
-  return v || null
+  const idx = await getKeyIndex()
+  return idx.find((it) => it.name === name) || null
 }
 
+// 写入/更新：直接更新索引数组中的对应项。
 async function putKey(rec: KeyRecord): Promise<void> {
-  await getKV().put(keyRecordKey(rec.name), JSON.stringify(rec))
   const idx = await getKeyIndex()
   const i = idx.findIndex((it) => it.name === rec.name)
   if (i >= 0) idx[i] = rec
@@ -270,11 +270,11 @@ async function putKey(rec: KeyRecord): Promise<void> {
 }
 
 async function removeKey(name: string): Promise<boolean> {
-  const exists = await findKeyByName(name)
-  if (!exists) return false
-  await getKV().delete(keyRecordKey(name))
   const idx = await getKeyIndex()
-  await setKeyIndex(idx.filter((it) => it.name !== name))
+  const before = idx.length
+  const next = idx.filter((it) => it.name !== name)
+  if (next.length === before) return false
+  await setKeyIndex(next)
   return true
 }
 

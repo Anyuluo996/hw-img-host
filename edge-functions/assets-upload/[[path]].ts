@@ -27,14 +27,27 @@ interface EdgeContext {
 const ALLOWED_ORIGIN = '*'
 
 function jsonRes(data: unknown, status = 200, headers?: Record<string, string>): Response {
+// 所有响应都带 Cache-Control: no-store —— 边缘函数是动态内容，
+// 不能让 CDN 缓存（否则会命中旧 SPA fallback，边缘函数永不生效）。
+const NO_STORE = { 'Cache-Control': 'no-store' }
+
+function jsonRes(data: unknown, status = 200, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN, ...(headers || {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+      ...NO_STORE,
+      ...(headers || {}),
+    },
   })
 }
 
 function emptyRes(status: number): Response {
-  return new Response(null, { status, headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN } })
+  return new Response(null, {
+    status,
+    headers: { 'Access-Control-Allow-Origin': ALLOWED_ORIGIN, ...NO_STORE },
+  })
 }
 
 // ============ X-API-Key 校验（与 assets-api 同款：KV 库 + 环境变量 fallback）============

@@ -19,10 +19,12 @@
   - [1.1 上传文件（服务端生成 key）](#11-上传文件服务端生成-key)
   - [1.2 上传文件（指定 key）](#12-上传文件指定-key)
   - [1.3 PicGo / 图床客户端上传（multipart）](#13-picgo--图床客户端上传multipart)
-  - [1.4 列举文件](#14-列举文件)
-  - [1.5 删除文件](#15-删除文件)
-  - [1.6 私有下载](#16-私有下载)
-  - [1.7 TTL 自动过期](#17-ttl-自动过期)
+  - [1.4 大文件三阶段上传（突破 6MB 限制）](#14-大文件三阶段上传突破-6mb-限制)
+  - [1.5 PicGo / 图床客户端大文件上传（边缘函数，实验性）](#15-picgo--图床客户端大文件上传边缘函数实验性)
+  - [1.6 列举文件](#16-列举文件)
+  - [1.7 删除文件](#17-删除文件)
+  - [1.8 私有下载](#18-私有下载)
+  - [1.9 TTL 自动过期](#19-ttl-自动过期)
 - [二、密钥管理 API](#二密钥管理-api)
 - [三、图床管理 API（前端用）](#三图床管理-api前端用)
   - [3.1 登录](#31-登录)
@@ -69,7 +71,7 @@
 | 403 | 越权（如访问不属于自己的 service） |
 | 404 | 资源不存在 |
 | 409 | 冲突（key 已存在） |
-| 413 | 文件超限（20MB） |
+| 413 | 文件超限（小文件直传路径 ≤ 20MB；大文件走 [1.4 三阶段上传](#14-大文件三阶段上传突破-6mb-限制)） |
 | 500 / 502 | 服务器错误 |
 
 ---
@@ -113,7 +115,7 @@
 | --- | --- | --- | --- |
 | `name` | string | 否 | 原始文件名（影响生成 key 与下载文件名）。缺省 `file-<ts>` |
 | `public` | string | 否 | `1`/`true` 返回公开 URL；缺省为私有（只能经私有下载拉取） |
-| `ttl` | string | 否 | 过期时间，见 [TTL](#17-ttl-自动过期)。缺省 1 天 |
+| `ttl` | string | 否 | 过期时间，见 [TTL](#19-ttl-自动过期)。缺省 1 天 |
 
 **请求体**：任意 `Content-Type` 的原始字节（非 multipart）。
 
@@ -156,7 +158,7 @@ curl -X POST "https://cdn.anyul.cn/api/assets?name=report.pdf&ttl=7d" \
 | `{service}` | 必须等于你的 key 绑定的 service |
 | `{key...}` | 可含 `/` 分层，如 `ocr/2026/001.jpg` |
 
-**Query 参数**：`ttl`（见 [TTL](#17-ttl-自动过期)）。指定 key 上传**不支持 public**（始终私有语义，URL 留空）。
+**Query 参数**：`ttl`（见 [TTL](#19-ttl-自动过期)）。指定 key 上传**不支持 public**（始终私有语义，URL 留空）。
 
 **示例**
 
@@ -182,7 +184,7 @@ curl -X PUT "https://cdn.anyul.cn/api/assets/koishi/ocr/001.jpg?ttl=1w" \
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `ttl` | string | 否 | 过期时间，见 [TTL](#17-ttl-自动过期)。缺省 1 天，`0` 永久 |
+| `ttl` | string | 否 | 过期时间，见 [TTL](#19-ttl-自动过期)。缺省 1 天，`0` 永久 |
 
 > 该端点**强制公开**（图床本质即公开），返回的 URL 任何人可访问，无需 key。
 
@@ -223,7 +225,130 @@ curl -X POST "https://cdn.anyul.cn/api/assets/upload" \
 | 表单字段名 | `file` |
 | JSONPath（取 URL） | `data.url` 或 `url` |
 
-### 1.4 列举文件
+> ⚠️ 该端点受 node-function ~6MB 请求体限制。**大文件请用 [1.5](#15-picgo--图床客户端大文件上传边缘函数实验性)。**
+
+### 1.4 大文件三阶段上传（突破 6MB 限制）
+
+Node Function 有 ~6MB 请求体上限。超过此限制的文件，用**三阶段上传**绕开：客户端直传到边缘函数 `upload-proxy`（流式转发 CNB），不经 node 内存。
+
+**流程**
+
+```
+客户端                    node /api/assets              边缘 upload-proxy           CNB
+  │                            │                            │                       │
+  │── POST /sign ─────────────▶│ 申请上传元数据              │                       │
+  │◀── uploadUrl + sessionId ──│ 预写 pending 索引(1h TTL)   │                       │
+  │                            │                            │                       │
+  │── PUT uploadUrl (大 body) ─────────────────────────────▶│ 流式转发 ────────────▶│
+  │◀── 200 ──────────────────────────────────────────────────│                       │
+  │                            │                            │                       │
+  │── POST /complete ─────────▶│ 复写索引为 ready            │                       │
+  │◀── 最终结果 ───────────────│                            │                       │
+```
+
+#### 阶段 1：申请上传签名
+
+**POST** `/api/assets/sign`
+
+**Query 参数**
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 否 | 原始文件名（影响生成 key）。缺省 `file-<ts>` |
+| `size` | number | **是** | 文件字节数（用于申请 CNB 上传配额） |
+| `key` | string | 否 | 指定 key（PUT 场景）。第一段必须等于你的 service，否则 403。不传则服务端生成 |
+| `public` | string | 否 | `1`/`true`（仅服务端生成 key 场景；指定 key 始终私有） |
+| `ttl` | string | 否 | 最终记录 TTL，见 [TTL](#19-ttl-自动过期) |
+
+**响应**
+
+```jsonc
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "sessionId": "uuid-...",                           // 三阶段会话 ID
+    "uploadUrl": "/upload-proxy/assets/t/<token>",     // 客户端 PUT 到此（相对路径）
+    "token": "<cnb-token>",
+    "cnbPath": "/slug/-/files/ID/uuid.pdf",
+    "assets": { "path": "/slug/-/files/ID/uuid.pdf" },
+    "type": "files",
+    "key": "koishi/report-xxx.pdf"
+  }
+}
+```
+
+> 指定 key 场景若已存在，返回 `409 {"code":1,"msg":"key 已存在"}`。
+> sign 阶段会**预写一条 pending 索引**（`status:"uploading"`，1h TTL）。若客户端 1h 内未调 complete，该记录及 CNB 文件会被自动清理（见[机制文档](./MECHANISM.md#孤儿自愈)）。
+
+#### 阶段 2：客户端直传
+
+**PUT** `<uploadUrl>`（即 `/upload-proxy/assets/t/<token>`）
+
+请求体为文件原始字节，`Content-Type: application/octet-stream`。边缘函数流式转发到 CNB，**不经 node 内存**。
+
+```bash
+curl -X PUT "https://cdn.anyul.cn/upload-proxy/assets/t/<token>" \
+  --data-binary @big-file.mp4
+```
+
+#### 阶段 3：完成上传
+
+**POST** `/api/assets/complete`
+
+**Body**（JSON）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sessionId` | string | **是** | 阶段 1 返回的 sessionId |
+| `size` | number | **是** | 实际文件字节数 |
+| `hash` | string | 否 | 文件 SHA-256（用于校验/去重） |
+| `mime` | string | 否 | MIME 类型，缺省 `application/octet-stream` |
+| `displayName` | string | 否 | 展示文件名 |
+| `public` | boolean | 否 | 是否公开，缺省 false |
+| `ttl` | string | 否 | 最终 TTL，见 [TTL](#19-ttl-自动过期)。缺省 1 天 |
+
+```bash
+curl -X POST "https://cdn.anyul.cn/api/assets/complete" \
+  -H "X-API-Key: k_xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId":"uuid-...","size":52428800,"hash":"sha256...","public":false,"ttl":"7d"}'
+```
+
+**响应**：同 [1.1](#11-上传文件服务端生成-key) 的 data 结构。
+
+> 幂等：同一 sessionId 重复调用会复写索引（不重复上传）。会话不存在或超时返回 404。
+
+### 1.5 PicGo / 图床客户端大文件上传（边缘函数，实验性）
+
+**POST** `/assets-upload`
+
+> ⚠️ **实验性端点**：EdgeOne 边缘函数对超大 multipart body 的内存承受能力未经实测。若大文件失败，回退到小文件端点 [1.3](#13-picgo--图床客户端上传multipart)。
+
+边缘函数直接接收大 multipart（不经 node-function 的 6MB 限制），解析 `file` 字段后流式 PUT 到 CNB。
+
+**鉴权**：`X-API-Key`（请求头 **或** form 字段均可，方便 PicGo 客户端配置）。
+**字段**：`file`（也兼容 `image`），单文件。
+**Query**：`public=1`、`ttl=7d`（同 [1.3](#13-picgo--图床客户端上传multipart)）。
+
+```bash
+curl -X POST "https://cdn.anyul.cn/assets-upload?public=1" \
+  -H "X-API-Key: k_xxxxxxxx" \
+  -F "file=@big-video.mp4"
+```
+
+**响应**：与 [1.3](#13-picgo--图床客户端上传multipart) 同形状（含顶层 `url` + `data`）。
+
+**PicGo 大文件配置示例**
+
+| 配置项 | 值 |
+| --- | --- |
+| API 地址 | `https://cdn.anyul.cn/assets-upload` |
+| 自定义 Header | `{ "X-API-Key": "k_xxxxxxxx" }` |
+| 表单字段名 | `file` |
+| JSONPath | `data.url` 或 `url` |
+
+### 1.6 列举文件
 
 **GET** `/api/assets`
 
@@ -273,7 +398,7 @@ curl "https://cdn.anyul.cn/api/assets?prefix=ocr/&limit=20" \
 
 > 列举会自动清理已过期记录（懒删除），并随机以一定概率从真相源重建索引，保证最终一致。
 
-### 1.5 删除文件
+### 1.7 删除文件
 
 **DELETE** `/api/assets/{service}/{key...}`
 
@@ -294,7 +419,7 @@ curl -X DELETE "https://cdn.anyul.cn/api/assets/koishi/ocr/001.jpg" \
 { "code": 1, "msg": "不存在" }  // HTTP 404
 ```
 
-### 1.6 私有下载
+### 1.8 私有下载
 
 **GET** `/assets-api/{service}/{key...}`
 
@@ -322,7 +447,7 @@ curl "https://cdn.anyul.cn/assets-api/koishi/big.mp4" \
 - 非图片：附件下载（`Content-Disposition: attachment`），文件名取自记录的 `name`
 - 记录已过期：触发懒删除（删 CNB 文件 + 索引）并返回 404
 
-### 1.7 TTL 自动过期
+### 1.9 TTL 自动过期
 
 平台无 cron/TTL 能力，采用**懒删除**：记录写入时存 `expiresAt`，在上传/列举/下载时扫描并清理（删 KV 索引 + CNB 实际文件）。
 
@@ -610,7 +735,7 @@ curl "https://cdn.anyul.cn/kv-api" \
 curl "https://cdn.anyul.cn/img-api/ID/uuid.jpg" -o cat.jpg
 ```
 
-> 私有文件（Assets API `public=0` 上传的）**不能**经此公开端点访问，只能经 [私有下载](#15-私有下载)。
+> 私有文件（Assets API `public=0` 上传的）**不能**经此公开端点访问，只能经 [私有下载](#18-私有下载)。
 
 ---
 

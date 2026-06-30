@@ -2,12 +2,14 @@ import { Router } from 'express'
 import type { Request, Response, NextFunction } from 'express'
 import multer from 'multer'
 import jwt from 'jsonwebtoken'
+import { randomUUID } from 'node:crypto'
 import {
   uploadToCnb,
   deleteFromCnb,
   buildAccessUrl,
   computeSHA256,
   detectUploadType,
+  signUpload,
 } from '../_utils'
 import { reply } from '../_reply'
 import { sanitizeFileName, MAX_FILE_SIZE } from '../_validation'
@@ -153,6 +155,22 @@ function parseTtl(ttlRaw: string | undefined): string | null {
   return new Date(Date.now() + ms).toISOString()
 }
 
+// pending 索引的孤儿清理窗口：sign 预写一条带此 TTL 的记录，
+// 客户端若 1h 内未调 complete，下次该 service 有活动时 sweepExpired 会删 KV 记录 + CNB 文件。
+const PENDING_TTL_MS = 60 * 60 * 1000
+
+// 从 CNB upload_url 提取上传 token。upload_url 形如 https://asset.cnb.cool/assets/t/<token>
+// 拼出客户端可用的边缘代理直传 URL（不经 node 内存，突破 6MB 限制）。
+function extractUploadToken(uploadUrl: string): string | null {
+  const m = uploadUrl.match(/\/assets\/t\/(.+)$/)
+  return m ? m[1] : null
+}
+
+// 三阶段上传会话 ID。complete 时凭它查回 pending 记录。
+function generateSessionId(): string {
+  return randomUUID()
+}
+
 // 调用边缘 assets-api 做 KV 索引读写（node 无法直接访问 img_kv 绑定）。
 // 自签短期 JWT，与 _utils.checkDuplicateByHash 同机制，免登录调边缘函数。
 // 返回值是 Fetch Response（全局），与 Express 的 Response 区分。
@@ -173,6 +191,198 @@ async function callAssetsEdge(path: string, init: RequestInit): Promise<globalTh
     clearTimeout(timeoutId)
   }
 }
+
+// ============ 大文件三阶段上传：sign → 客户端 PUT upload-proxy → complete ============
+// 突破 node-function ~6MB body 限制：sign 预写 pending 索引（1h TTL，孤儿自动清 CNB），
+// 客户端直传到边缘 upload-proxy（流式转发 CNB），complete 复写索引为 ready。
+// 详细说明见文件头注释。
+
+// 从 req.fileBuffer 解析 JSON body（bodyRouter 把非 multipart body 读成原始字节）。
+function parseBodyJson<T = unknown>(req: AssetReq): T | null {
+  const buf = req.fileBuffer
+  if (!buf || buf.length === 0) return null
+  try {
+    return JSON.parse(buf.toString('utf8')) as T
+  } catch {
+    return null
+  }
+}
+
+// POST /sign —— 阶段1：申请 CNB 上传元数据 + 预写 pending 索引。
+//   ?name=&size=&public=&ttl=     POST / 场景（服务端生成 key）
+//   ?key=&name=&size=             PUT 场景（指定 key，强隔离校验，冲突 409）
+// 返回 uploadUrl（指向边缘 upload-proxy）、sessionId、cnbPath 等。
+router.post('/sign', authGate, async (req: AssetReq, res) => {
+  try {
+    const service = req.callerService!
+    const name = sanitizeFileName((req.query.name as string) || `file-${Date.now()}`)
+    const size = parseInt((req.query.size as string) || '0', 10)
+    if (!name || size <= 0) return res.status(400).json(reply(1, '缺少 name 或 size'))
+
+    // 指定 key 场景（PUT）：校验强隔离 + 冲突检测
+    let fileKey: string | null = null
+    if (req.query.key !== undefined) {
+      const segs = sanitizeKeySegments(splitKeyPath(req.query.key as string | string[]))
+      if (segs.length < 2 || segs[0] !== service) return deny(res, 403)
+      fileKey = segs.slice(1).join('/')
+      // 冲突检测：同 service+key 已存在 → 409（同 PUT 逻辑）
+      const conflictRes = await callAssetsEdge(
+        `/check?service=${encodeURIComponent(service)}&key=${encodeURIComponent(fileKey)}`,
+        { method: 'GET' },
+      )
+      if (conflictRes.ok) {
+        const conf = (await conflictRes.json()) as { code: number; data?: { exists: boolean } }
+        if (conf.code === 0 && conf.data?.exists) {
+          return res.status(409).json(reply(1, 'key 已存在'))
+        }
+      }
+    } else {
+      // 服务端生成 key（同 POST / 逻辑：原名-时间短哈希.ext）
+      const stamp = Date.now().toString(36)
+      const extMatch = name.match(/\.([a-z0-9]+)$/i)
+      const stem = extMatch ? name.slice(0, extMatch.index) : name
+      const ext = extMatch ? extMatch[1] : 'bin'
+      fileKey = `${stem}-${stamp}-${size.toString(36)}.${ext}`
+    }
+
+    // 申请 CNB 上传元数据（拿 upload_url）
+    const signed = await signUpload({ fileName: name, fileSize: size })
+    const uploadToken = extractUploadToken(signed.upload_url)
+    if (!uploadToken) {
+      return res.status(500).json(reply(1, '上传地址格式异常'))
+    }
+
+    const cnbPath = String(signed.assets.path)
+    const sessionId = generateSessionId()
+
+    // 预写 pending 索引：cnbPath + 1h TTL，孤儿会被 sweepExpired 自动清（含 CNB 文件）
+    const now = new Date()
+    const pending = {
+      service,
+      key: fileKey,
+      public: false,
+      url: '',
+      cnbPath,
+      hash: '',
+      name,
+      size: 0,
+      mime: '',
+      status: 'uploading' as const,
+      sessionId,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + PENDING_TTL_MS).toISOString(),
+    }
+    const idxRes = await callAssetsEdge('/index', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pending),
+    })
+    if (!idxRes.ok) {
+      console.error('assets /sign 预写索引失败:', idxRes.status)
+      return res.status(500).json(reply(1, '预写索引失败'))
+    }
+
+    return res.json(
+      reply(0, 'ok', {
+        sessionId,
+        uploadUrl: `/upload-proxy/assets/t/${uploadToken}`,
+        token: uploadToken,
+        cnbPath,
+        assets: signed.assets,
+        type: signed.type,
+        key: `${service}/${fileKey}`,
+      }),
+    )
+  } catch (e) {
+    console.error('assets /sign 失败:', (e as Error).message)
+    return res.status(500).json(reply(1, '申请签名失败'))
+  }
+})
+
+// POST /complete —— 阶段3：查 pending 记录 + 复写为 ready。
+// body: { sessionId, size, hash, mime?, displayName?, public?, ttl? }
+// 幂等：同一 sessionId 可重复调用（已 ready 则直接返回，不重新计算）。
+router.post('/complete', authGate, async (req: AssetReq, res) => {
+  try {
+    const service = req.callerService!
+    const body = parseBodyJson<{
+      sessionId?: string
+      size?: number
+      hash?: string
+      mime?: string
+      displayName?: string
+      public?: boolean
+      ttl?: string
+    }>(req)
+    if (!body || !body.sessionId || !body.size) {
+      return res.status(400).json(reply(1, '缺少 sessionId 或 size'))
+    }
+
+    // 按 sessionId 反查 pending 记录。node 无法直接扫 KV，走边缘 list。
+    // 用 sessionId 作为 prefix 不可行（它不是 key 的一部分），所以列出全部再筛。
+    // 低频中转场景可接受；pending 1h 后自动消失，列表规模有上限。
+    const listRes = await callAssetsEdge(
+      `/list?service=${encodeURIComponent(service)}&limit=500`,
+      { method: 'GET' },
+    )
+    if (!listRes.ok) return res.status(502).json(reply(1, '查询 pending 失败'))
+    const listData = (await listRes.json()) as {
+      code: number
+      data?: {
+        items?: Array<{
+          sessionId?: string
+          key?: string
+          cnbPath?: string
+        }>
+      }
+    }
+    const found = listData.data?.items?.find((it) => it.sessionId === body.sessionId)
+    if (!found) return res.status(404).json(reply(1, '会话不存在或已过期'))
+
+    // 文件已在 upload-proxy 阶段落到 CNB，这里只复写索引：补全 size/hash/mime，
+    // 定稿 TTL，标记 ready。cnbPath 从 pending 记录继承。
+    const isPublic = body.public === true
+    const baseUrl = process.env.BASE_IMG_URL!
+    const cnbPath = found.cnbPath || ''
+    const recordUrl = isPublic ? buildAccessUrl(baseUrl, cnbPath) : ''
+
+    const now = new Date()
+    const finalRecord = {
+      service,
+      key: found.key || '',
+      public: isPublic,
+      url: recordUrl,
+      cnbPath,
+      hash: body.hash || '',
+      name: body.displayName || '',
+      size: body.size,
+      mime: body.mime || 'application/octet-stream',
+      status: 'ready' as const,
+      createdAt: now.toISOString(),
+      expiresAt: parseTtl(body.ttl),
+    }
+    const idxRes = await callAssetsEdge('/index', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(finalRecord),
+    })
+    if (!idxRes.ok) return res.status(502).json(reply(1, '复写索引失败'))
+
+    return res.json(
+      reply(0, 'ok', {
+        key: `${service}/${finalRecord.key}`,
+        url: recordUrl || null,
+        public: isPublic,
+        size: body.size,
+        hash: body.hash || '',
+        expiresAt: finalRecord.expiresAt,
+      }),
+    )
+  } catch (e) {
+    console.error('assets /complete 失败:', (e as Error).message)
+    return res.status(500).json(reply(1, '完成上传失败'))
+  }
+})
 
 // ============ PUT /:service/:key+  指定 key 上传（冲突 409） ============
 // Express 5 用 path-to-regexp v8，裸 /* 通配不再合法，必须命名：'/*splat'。

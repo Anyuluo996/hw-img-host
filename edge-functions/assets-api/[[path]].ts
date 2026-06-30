@@ -320,6 +320,8 @@ interface AssetRecord {
   mime?: string
   createdAt?: string
   expiresAt?: string | null // ISO 时间戳；null/缺省=永不过期。懒删除据此清理
+  status?: 'uploading' | 'ready' // 大文件三阶段上传标记；缺省=ready（兼容旧记录）
+  sessionId?: string // 三阶段上传会话 ID（complete 时反查用）
 }
 
 // ============ TTL 懒删除 ============

@@ -59,44 +59,89 @@ GET /img-api/* (eg. https://img.example.com/img-api/path/to/img.webp)
 
 - **Node.js**: `^20.19.0` 或 `>=22.12.0`
 - **pnpm**: `11.0.9`（package.json 已锁定版本）
+- **EdgeOne CLI**: `>=1.2.30`（本地全栈开发 + 部署，`npm i -g edgeone`）
 
-### 安装
+### 方式一：AI Agent 自动部署（推荐）
+
+本项目内置 Agent Skills，支持 AI 编程助手（ZCode / Cursor / Windsurf 等）一键部署到 EdgeOne Pages。
+
+1. **Fork 本仓库**到你的 GitHub
+
+2. **用 AI Agent 打开项目**，直接说：
+
+   > 部署这个项目到 EdgeOne Pages
+
+   Agent 会自动调用 `.agents/skills/edgeone-pages-deploy` skill：
+   - 检查 EdgeOne CLI 版本
+   - 引导登录（浏览器 / Token 两种方式）
+   - 构建并部署，返回访问 URL
+
+3. **配置环境变量**（部署后在 EdgeOne 控制台设置，见[环境配置](#环境配置)）
+
+> 💡 Agent 也能帮你做本地开发：说"启动本地开发服务器"，它会调用 `edgeone-pages-dev` skill 启动全栈 dev（前端 + 函数 + KV）。
+>
+> Skills 位于 `.agents/skills/`，已通过 `skills-lock.json` 锁定版本，Fork 后即可使用。
+
+### 方式二：手动安装
 
 ```sh
+git clone https://github.com/Anyuluo996/hw-img-host.git
+cd hw-img-host
 pnpm install
 ```
 
-### 开发运行
+#### 前端开发（纯 UI）
 
 ```sh
 pnpm dev
 ```
 
-访问 `http://localhost:5173`。
+访问 `http://localhost:5173`。此模式无后端，API 请求不可用。
+
+#### 全栈开发（前端 + 函数 + KV）
+
+```sh
+# 首次：关联 EdgeOne 项目 + 拉取环境变量
+PAGES_SOURCE=skills edgeone pages link
+PAGES_SOURCE=skills edgeone pages env pull
+
+# 启动全栈 dev server
+PAGES_SOURCE=skills edgeone pages dev
+```
+
+访问 `http://localhost:8088`。所有 API 端点 + KV 均可用。
+
+> ⚠️ 全栈 dev 会拉取线上环境变量到 `.env`（含真实密钥，已 gitignore）。
 
 ### 常用命令
 
-| 命令              | 说明                        |
-| ----------------- | --------------------------- |
-| `pnpm dev`        | 启动 Vite 开发服务器        |
-| `pnpm build`      | 类型检查 + 构建生产版本     |
-| `pnpm type-check` | 仅运行 TypeScript 类型检查  |
-| `pnpm lint`       | ESLint 检查并自动修复       |
-| `pnpm format`     | Prettier 格式化 `src/` 目录 |
-| `pnpm preview`    | 本地预览生产构建            |
+| 命令 | 说明 |
+| --- | --- |
+| `pnpm dev` | Vite 前端开发服务器（`:5173`） |
+| `pnpm build` | 类型检查 + 构建生产版本 |
+| `pnpm type-check` | TypeScript 类型检查（`src/`） |
+| `pnpm lint` | ESLint 检查并自动修复 |
+| `pnpm format` | Prettier 格式化 `src/` |
+| `pnpm test` | Vitest 单次测试 |
+| `pnpm preview` | 本地预览生产构建 |
+| `edgeone pages dev` | 全栈本地开发（`:8088`，含函数 + KV） |
+| `edgeone pages deploy` | 手动部署到 EdgeOne Pages |
 
 ## 环境配置
 
 在 EdgeOne 控制台中设置以下环境变量（不在 `.env` 文件中配置）：
 
-| 变量                  | 说明                                                                                              | 示例                       |
-| --------------------- | ------------------------------------------------------------------------------------------------- | -------------------------- |
-| `BASE_IMG_URL`        | 图床域名，**结尾必须带斜杠**                                                                      | `https://img.example.com/` |
-| `SLUG_IMG`            | CNB 图床仓库名                                                                                    | `your-username/your-repo`  |
-| `TOKEN_IMG`           | CNB 个人访问令牌                                                                                  | `xxxx`                     |
-| `UPLOAD_PASSWORD`     | 登录密码（未设置则登录接口不可用）。**不应**兼作 JWT 密钥，请配置 `JWT_SECRET`                    | `your-secret-123`          |
-| `JWT_SECRET`          | **JWT 签名密钥（强烈建议设置）**。与登录密码解耦，避免密码泄露即可伪造 token。可用 `openssl rand -hex 32` 生成 | `a1b2...(64 字符)` |
-| `KV_ALLOWED_ORIGINS`  | kv-api 管理端点的 CORS 白名单（逗号分隔），不设则用默认值（站点域名 + localhost）                | `https://img.example.com`  |
+| 变量 | 说明 | 示例 |
+| --- | --- | --- |
+| `BASE_IMG_URL` | 图床域名，**结尾必须带斜杠** | `https://img.example.com/` |
+| `SLUG_IMG` | CNB 图床仓库名 | `your-username/your-repo` |
+| `TOKEN_IMG` | CNB token（imgs 读写） | `xxxx` |
+| `TOKEN_FILE` | CNB token（files 读写，需 `repo-notes:rw`） | `xxxx` |
+| `TOKEN_DELETE` | CNB token（删除文件，需 `repo-manage:rw`）；可选 | `xxxx` |
+| `UPLOAD_PASSWORD` | 登录密码（未设置则登录接口不可用） | `your-secret-123` |
+| `JWT_SECRET` | **JWT 签名密钥（强烈建议独立设置）**。与登录密码解耦，避免密码泄露即可伪造 token。`openssl rand -hex 32` | `a1b2...(64 字符)` |
+| `KV_ALLOWED_ORIGINS` | kv-api 管理端点的 CORS 白名单（逗号分隔） | `https://img.example.com` |
+| `ASSETS_KEYS` | Assets API 密钥 fallback（JSON）；也可在管理页面创建 | `{"koishi":"k_xxx"}` |
 
 > **密码与密钥分离**：`UPLOAD_PASSWORD` 仅用于登录校验，`JWT_SECRET` 用于签发/验证 token。两者解耦后，即使登录密码泄露，攻击者也无法伪造 token；token 也无法反推密码。未配置 `JWT_SECRET` 时回退用 `UPLOAD_PASSWORD`（向后兼容，但建议尽快补配独立密钥）。
 > **CORS 收紧**：`kv-api`（管理/写端点）默认只允许站点域名和 localhost 调用；公开读端点（`/img`、`/img-api`、`/file-api`）保持 `*` 开放，便于跨站引用图片。
@@ -123,69 +168,57 @@ pnpm dev
 
 ```
 hw-img-host/
-├── src/                           # 前端源码
-│   ├── main.ts                    # 应用入口
-│   ├── App.vue                    # 根组件
-│   ├── views/
-│   │   ├── HomeView.vue           # 主页面（上传设置 + 上传器 + 结果展示）
-│   │   ├── GalleryView.vue        # 图片画廊页面
-│   │   └── LoginView.vue          # 登录页面（密码认证）
-│   ├── components/
-│   │   ├── public/
-│   │   │   └── FileUploader.vue   # 核心上传组件（压缩/缩略图/上传逻辑）
-│   │   └── ui/                    # shadcn-vue 组件
-│   │       ├── button/            # Button
-│   │       ├── input/             # Input（密码输入）
-│   │       ├── label/             # Label（表单标签）
-│   │       ├── progress/          # Progress（上传进度条）
-│   │       ├── slider/            # Slider（压缩质量滑块）
-│   │       └── switch/            # Switch（缩略图开关）
-│   ├── composables/
-│   │   └── useAuth.ts             # JWT 认证（login/logout/token 管理 + axios 拦截器）
-│   ├── router/
-│   │   └── index.ts               # 路由配置：/ (首页)、/gallery (画廊)、/login (登录)
-│   ├── lib/
-│   │   └── utils.ts               # cn() 工具函数 (clsx + tailwind-merge)
-│   └── assets/
-│       └── main.css               # TailwindCSS + shadcn-vue CSS 变量
-├── node-functions/                # Node 函数 (后端 API)
-│   └── api/
-│       ├── [[default]].ts         # Express 入口，挂载 /auth 和 /upload 子路由
-│       ├── routes/
-│       │   ├── auth.ts            # POST /auth/login — 密码验证 + JWT 签发
-│       │   └── upload.ts          # GET /upload/sign + POST /upload/img（multer 20MB）
-│       ├── _auth.ts               # getSecret() + authMiddleware (JWT 校验)
-│       ├── _utils.ts              # uploadToCnb() / signUpload() / buildImageUrl()
-│       └── _reply.ts              # 统一响应格式 { code, msg, data }
-├── edge-functions/                # 边缘函数 (图片代理)
-│   └── img-api/
-│       └── [[path]].ts            # 动态路由: GET /img-api/* → CNB 代理
-├── public/                        # 静态资源
-├── img/                           # 文档图片资源
-├── eslint.config.ts               # ESLint 扁平配置
-├── vite.config.ts                 # Vite 配置
-├── components.json                # shadcn-vue 配置
+├── src/                           # 前端源码（Vue 3 SPA）
+│   ├── views/                     # 页面：Home/Gallery/Tags/AssetsKeys/Login/Root
+│   ├── components/                # FileUploader + shadcn-vue ui/
+│   ├── composables/useAuth.ts     # JWT 认证 + axios 拦截器
+│   └── router/                    # 路由（含秘密登录路径）
+├── node-functions/api/            # Node Cloud Functions（Express 5）
+│   ├── [[default]].ts             # 入口（assets 路由在 json() 之前挂载）
+│   ├── routes/                    # auth/upload/delete/assets/assets-keys
+│   ├── _utils.ts                  # CNB 上传/删除/签名工具
+│   ├── _auth.ts                   # JWT 签发/验证
+│   └── _validation.ts             # 文件名净化 + MAX_FILE_SIZE
+├── edge-functions/                # Edge Functions（V8 运行时）
+│   ├── assets-api/                # KV 索引 + 私有下载 + 密钥库
+│   ├── assets-upload/             # PicGo 大文件 multipart（直接写 KV）
+│   ├── upload-proxy/              # 大文件流式转发到 CNB
+│   ├── img-api/ file-api/         # 图片/文件代理
+│   ├── kv-api/                    # 图库索引（前端用）
+│   └── img/                       # 随机图端点
+├── tests/                         # Vitest + supertest
+├── docs/                          # API.md / MECHANISM.md / DEVELOPMENT.md
+├── scripts/                       # CLI 上传工具 + 油猴脚本
+├── .agents/skills/                # AI Agent Skills（部署 + 开发）
 └── package.json
 ```
 
 ## 上传流程
 
-### 客户端直传 (推荐)
+本服务支持多种上传方式，详见 [API.md 上传端点选择](./docs/API.md#上传端点选择)：
 
-1. **登录认证**：`POST /api/auth/login` 获取 JWT token，存入 localStorage
-2. **选择文件**：拖拽或点击选择图片（≤ 20MB）
-3. **客户端压缩**：Canvas API 将图片转为 WebP 格式，按用户设定的质量压缩
-4. **缩略图生成**（可选）：基于压缩后的图片生成缩略图
-5. **获取签名**：`GET /api/upload/sign`（需 Bearer token），向 CNB API 获取上传签名 URL
-6. **直传 CNB**：`PUT` 到 CNB 签名 URL，直接上传文件内容
-7. **展示链接**：返回 EdgeOne 代理链接（带 CORS）和 CNB 原始链接
+| 方式 | 端点 | 大小限制 | 适用场景 |
+| --- | --- | --- | --- |
+| 客户端直传 | `GET /api/upload/sign` → `PUT` | ≤ 20MB | 前端图库（压缩后直传 CNB） |
+| 服务端上传 | `POST /api/upload/img` | ≤ 6MB | multipart 上传（含缩略图） |
+| Assets API | `POST /api/assets` / `PUT` | ≤ 6MB | 程序化上传（外部服务） |
+| 三阶段上传 | `sign → upload-proxy → complete` | **无限制** | 大文件（视频、归档包） |
+| PicGo 大文件 | `POST /assets-upload` | **无限制** | PicGo/PicList 图床客户端 |
 
-### 服务端上传
-
-使用 `POST /api/upload/img`（multipart/form-data），由服务端 multer 接收后通过 `uploadToCnb()` 上传至 CNB，返回代理链接。
+> ⚠️ Node Function 请求体上限 ~6MB（EdgeOne 平台限制），超限会 500 崩溃。
+> 大文件必须用三阶段上传或 `/assets-upload`，详见 [开发指南 - 平台边界](./docs/DEVELOPMENT.md#平台边界与限制)。
 
 ## 贡献
 
 欢迎提交 Issue 或 Pull Request。
+
+## 更多文档
+
+| 文档 | 内容 |
+| --- | --- |
+| [docs/API.md](./docs/API.md) | HTTP API 完整参考（Assets 中转 API、图床管理 API、公开访问端点、错误码） |
+| [docs/MECHANISM.md](./docs/MECHANISM.md) | 机制原理（三阶段上传、孤儿自愈、TTL 懒删除、乐观并发、EdgeOne 平台约束） |
+| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发指南（环境搭建、本地开发、代码规范、平台边界、调试技巧、部署、测试） |
+| [AGENTS.md](./AGENTS.md) | Agent 开发指南（包管理器、命令、架构、代码约定） |
 
 <!-- build trigger 1782514178 -->

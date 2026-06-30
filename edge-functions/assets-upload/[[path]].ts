@@ -129,33 +129,6 @@ async function resolveService(
   return null
 }
 
-// ============ JWT 自签（调内部 assets-api 索引端点）============
-
-async function signInternalJwt(env: Record<string, string | undefined>): Promise<string | null> {
-  const secret = env.JWT_SECRET || env.UPLOAD_PASSWORD
-  if (!secret) return null
-  // 边缘运行时无 jsonwebtoken，手写 HS256 JWT（5min 过期）
-  const enc = (obj: unknown) =>
-    btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-  const header = enc({ alg: 'HS-256', typ: 'JWT' })
-  const now = Math.floor(Date.now() / 1000)
-  const payload = enc({ iat: now, exp: now + 300 })
-  const data = `${header}.${payload}`
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  )
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data))
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-  return `${data}.${sigB64}`
-}
-
 // ============ 主入口 ============
 
 export async function onRequest(context: EdgeContext): Promise<Response> {
@@ -236,10 +209,6 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
     const subPath = (cnbPath.match(/-\/(?:imgs|files)\/(.+)/) || [])[1] || ''
     const recordUrl = isPublic ? `${baseUrl}/${proxyPrefix}/${subPath}` : ''
 
-    // 3. 写 KV 索引（自签 JWT 调 assets-api/index）
-    const jwt = await signInternalJwt(env)
-    if (!jwt) return jsonRes({ code: 1, msg: 'JWT_SECRET 未配置' }, 500)
-
     // 生成服务端 key（与 node POST / 同逻辑）
     const stamp = Date.now().toString(36)
     const extMatch = file.name.match(/\.([a-z0-9]+)$/i)
@@ -277,13 +246,37 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
       createdAt: new Date().toISOString(),
       expiresAt,
     }
-    const idxResp = await fetch(`${baseUrl}/assets-api/index`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify(record),
-    })
-    if (!idxResp.ok) {
-      // 文件已上传但索引失败，告知调用方
+
+    // 3. 直接写 KV 索引（共享 img_kv 绑定，不经 HTTP 回环）
+    //    单条记录 asset_{service}_{key} + 聚合索引 aidx_{service}（append）。
+    //    聚合索引用乐观并发（与 assets-api 同机制），失败则仅写单条记录
+    //    （list 的 rebuild 兜底会自愈聚合索引）。
+    try {
+      const kv = getKV()
+      await kv.put(`asset_${service}_${fileKey}`, JSON.stringify(record))
+      // 聚合索引：读改写 append（3 次重试，与 assets-api.mutateIndex 同构）
+      let appended = false
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const idxRaw = (await kv.get(`aidx_${service}`, 'json').catch(() => null)) as
+          | unknown[]
+          | { ver?: number; items?: unknown[] }
+          | null
+        let state: { ver: number; items: unknown[] }
+        if (Array.isArray(idxRaw)) state = { ver: Date.now(), items: idxRaw }
+        else if (idxRaw && typeof idxRaw === 'object' && Array.isArray(idxRaw.items))
+          state = idxRaw as { ver: number; items: unknown[] }
+        else state = { ver: 0, items: [] }
+
+        const next = [...state.items, record]
+        await kv.put(`aidx_${service}`, JSON.stringify({ ver: state.ver + 1, items: next }))
+        appended = true
+        break
+      }
+      if (!appended) {
+        // 聚合索引写失败不阻塞（rebuild 兜底会自愈），但记录已落 KV
+        console.error('assets-upload: 聚合索引 append 失败，单条记录已写入')
+      }
+    } catch {
       return jsonRes({ code: 1, msg: '已上传但索引失败' }, 500)
     }
 

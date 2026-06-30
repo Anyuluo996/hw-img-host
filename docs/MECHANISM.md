@@ -13,6 +13,7 @@ API 用法见 [API.md](./API.md)。
 - [索引乐观并发](#索引乐观并发)
 - [强隔离模型](#强隔离模型)
 - [node ↔ 边缘函数 委托模式](#node--边缘函数-委托模式)
+- [EdgeOne 平台约束](#edgeone-平台约束)
 
 ---
 
@@ -258,6 +259,8 @@ node 路由                        边缘 assets-api
 
 `callAssetsEdge(path, init)`（`assets.ts`）封装了这个调用：自签短期 JWT，附在 `Authorization: Bearer` 头上。边缘函数 `verifyJwt()` 校验签名 + 过期时间。
 
+> ⚠️ **仅 node → 边缘函数方向可用**。边缘函数 → 自身域名的 HTTP 回环调用会失败（见 [EdgeOne 平台约束](#edgeone-平台约束)）。`assets-upload` 边缘函数因此改为直接操作 KV，不经 HTTP。
+
 ### 为什么自签 JWT 而非共享密钥头
 
 - JWT 有过期时间（5min），即便被截获窗口也短
@@ -275,6 +278,69 @@ return crypto.subtle.verify('HMAC', key, signature, data)
 
 ---
 
+## EdgeOne 平台约束
+
+开发中踩过的坑，记录以免重蹈覆辙。
+
+### 1. 边缘函数不能 HTTP 回环调用自身域名
+
+**现象**：边缘函数内 `fetch('https://自己的域名/...')` 会失败（超时或连接错误）。
+
+**根因**：EdgeOne 网络层不支持边缘函数 → 自身域名的回环请求。请求会路由回边缘层，但找不到出口。
+
+**影响**：`assets-upload` 最初想通过 HTTP 调 `assets-api/index` 写索引，线上报"已上传但索引失败"。
+
+**解法**：边缘函数之间共享 `img_kv` 绑定，**直接操作 KV**（单条记录 + 聚合索引），绕开 HTTP。node → 边缘函数方向不受影响（node 是 Cloud Function，走正常出站 HTTP）。
+
+```
+✅ node-function → fetch(边缘函数)     正常出站 HTTP
+❌ edge-function → fetch(同域边缘函数)  回环，失败
+✅ edge-function → 直接操作共享 KV      绕开 HTTP
+```
+
+### 2. `[[path]].ts` 不匹配根路径（无子段）
+
+**现象**：`edge-functions/foo/[[path]].ts` 只匹配 `/foo/*`（**带子路径段**），不匹配 `/foo`（根路径）。
+
+**根因**：`[[path]]` 是 catch-all 参数，必须有至少一个路径段才命中。根路径请求落到了 SPA fallback。
+
+**影响**：`POST /assets-upload`（PicGo 客户端打根路径）返回 SPA index.html。
+
+**解法**：加 `index.ts` 重新导出 `onRequest`，让 EdgeOne 注册精确路径 `/foo`：
+
+```ts
+// edge-functions/foo/index.ts
+import { onRequest } from './[[path]]'
+export { onRequest }
+```
+
+> `upload-proxy` 没 `index.ts` 但正常工作 —— 因为它的请求永远带子路径段（`/upload-proxy/assets/t/<token>`）。
+
+### 3. 构建失败时边缘函数静默不注册
+
+**现象**：边缘函数 TS 有语法错误，esbuild 构建报错，但 EdgeOne **不报错上线**，只是该函数不注册，请求落到 SPA fallback。线上表现为"返回 index.html"，容易被误判为路由或缓存问题。
+
+**解法**：**本地 `edgeone pages dev` 验证**。构建错误会直接打印在 dev 日志里（`ERROR: Unexpected "export"` 等），比线上黑盒好排查得多。
+
+```bash
+PAGES_SOURCE=skills edgeone pages dev   # http://localhost:8088
+```
+
+### 4. 边缘函数响应默认可被 CDN 缓存
+
+**现象**：边缘函数返回的响应如果没设 `Cache-Control`，EdgeOne CDN 可能缓存结果（`EO-Cache-Status: Cache Hit`），导致后续请求拿到旧响应。
+
+**解法**：动态内容的边缘函数显式设 `Cache-Control: no-store`：
+
+```ts
+const NO_STORE = { 'Cache-Control': 'no-store' }
+return new Response(body, { headers: { ...NO_STORE } })
+```
+
+> `assets-api` 的私有下载设 `private, max-age=60`（合理，同用户短缓存）。`assets-upload` 设 `no-store`（每次都不同）。
+
+---
+
 ## 相关文件索引
 
 | 文件 | 职责 |
@@ -285,5 +351,5 @@ return crypto.subtle.verify('HMAC', key, signature, data)
 | `node-functions/api/_assets_auth.ts` | X-API-Key 校验 |
 | `edge-functions/assets-api/[[path]].ts` | KV 索引 + 私有下载 + 密钥库 |
 | `edge-functions/upload-proxy/[[path]].ts` | 大文件流式转发 |
-| `edge-functions/assets-upload/[[path]].ts` | PicGo 大文件 multipart（实验性） |
+| `edge-functions/assets-upload/[[path]].ts` | PicGo 大文件 multipart（直接写 KV，不经 HTTP 回环） |
 | `edge-functions/kv-api/[[path]].ts` | 图库索引（前端用） |

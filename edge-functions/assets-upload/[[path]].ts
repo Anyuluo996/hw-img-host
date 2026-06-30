@@ -26,7 +26,6 @@ interface EdgeContext {
 
 const ALLOWED_ORIGIN = '*'
 
-function jsonRes(data: unknown, status = 200, headers?: Record<string, string>): Response {
 // 所有响应都带 Cache-Control: no-store —— 边缘函数是动态内容，
 // 不能让 CDN 缓存（否则会命中旧 SPA fallback，边缘函数永不生效）。
 const NO_STORE = { 'Cache-Control': 'no-store' }

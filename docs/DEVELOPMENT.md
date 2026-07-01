@@ -69,9 +69,10 @@ PAGES_SOURCE=skills edgeone pages env pull # 拉取环境变量到 .env
 | --- | --- | --- |
 | `BASE_IMG_URL` | 站点域名 | `https://your-domain.com/` |
 | `SLUG_IMG` | CNB 图床仓库 | `user/repo` |
-| `TOKEN_IMG` | CNB token(imgs 读写) | |
-| `TOKEN_FILE` | CNB token(files,需 `repo-notes:rw`) | |
-| `TOKEN_DELETE` | CNB token(删除,需 `repo-manage:rw`) | |
+| `CNB_TOKEN` | **CNB 统一 token（推荐，全权限即可）** | `xxxx` |
+| `TOKEN_IMG` | CNB token(imgs 读写)；可选,覆盖 CNB_TOKEN | |
+| `TOKEN_FILE` | CNB token(files,需 `repo-notes:rw`);可选 | |
+| `TOKEN_DELETE` | CNB token(删除,需 `repo-manage:rw`);可选 | |
 | `UPLOAD_PASSWORD` | 登录密码(兼 JWT 密钥 fallback) | |
 | `JWT_SECRET` | JWT 签名密钥(**建议独立配置**)`openssl rand -hex 32` | |
 | `KV_ALLOWED_ORIGINS` | kv-api CORS 白名单(逗号分隔) | |

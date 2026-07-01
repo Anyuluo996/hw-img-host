@@ -141,7 +141,7 @@ async function deleteCnbFile(
   cnbPath: string,
   env: Record<string, string | undefined>,
 ): Promise<boolean> {
-  const token = env.TOKEN_DELETE
+  const token = env.TOKEN_DELETE || env.CNB_TOKEN
   const slug = env.SLUG_IMG
   if (!token || !slug) return false
   const subPath = extractCnbSubPath(cnbPath)
@@ -204,10 +204,11 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
 
     const baseUrl = (env.BASE_IMG_URL || '').replace(/\/$/, '')
     const slug = env.SLUG_IMG
-    const tokenImg = env.TOKEN_IMG
-    const tokenFile = env.TOKEN_FILE
+    // 细分 token 优先，回退到统一 CNB_TOKEN
+    const tokenImg = env.TOKEN_IMG || env.CNB_TOKEN
+    const tokenFile = env.TOKEN_FILE || env.CNB_TOKEN
     if (!baseUrl || !slug || (!tokenImg && !tokenFile)) {
-      return jsonRes({ code: 1, msg: '服务端未配置' }, 500)
+      return jsonRes({ code: 1, msg: '服务端未配置 TOKEN 或 SLUG_IMG' }, 500)
     }
 
     // 按扩展名判定类型（与 node detectUploadType 一致）

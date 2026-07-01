@@ -356,7 +356,7 @@ async function deleteCnbFile(
   cnbPath: string,
   env: Record<string, string | undefined>,
 ): Promise<boolean> {
-  const token = env.TOKEN_DELETE
+  const token = env.TOKEN_DELETE || env.CNB_TOKEN
   const slug = env.SLUG_IMG
   if (!token || !slug) return false
   const subPath = extractCnbSubPath(cnbPath)
@@ -456,7 +456,7 @@ async function reconcileCnb(
   env: Record<string, string | undefined>,
   mode: 'dry-run' | 'delete',
 ): Promise<{ cnbTotal: number; kvTotal: number; orphans: string[]; deleted: number }> {
-  const token = env.TOKEN_DELETE
+  const token = env.TOKEN_DELETE || env.CNB_TOKEN
   const slug = env.SLUG_IMG
   if (!token || !slug) {
     return { cnbTotal: 0, kvTotal: 0, orphans: [], deleted: 0 }

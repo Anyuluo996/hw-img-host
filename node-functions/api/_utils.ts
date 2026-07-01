@@ -1,8 +1,15 @@
-// 上传类型：图片走 imgs（TOKEN_IMG），任意文件走 files（TOKEN_FILE，需 repo-notes:rw scope）
+// 上传类型：图片走 imgs，任意文件走 files
 type UploadType = 'imgs' | 'files'
 
 import { createHash } from 'node:crypto'
 import jwt from 'jsonwebtoken'
+
+// 统一 token 取值：优先用细分 token（TOKEN_IMG/TOKEN_FILE/TOKEN_DELETE），
+// 缺省回退到 CNB_TOKEN（全权限）。只需配一个 CNB_TOKEN 即可运行。
+// 细分 token 用于最小权限原则（如只给上传不给删除的服务）。
+function getCnbToken(specific?: string): string | undefined {
+  return specific || process.env.CNB_TOKEN
+}
 
 // 算文件 buffer 的 SHA-256（用于查重，和前端 Web Crypto 结果一致）
 function computeSHA256(buffer: Buffer): string {
@@ -95,9 +102,9 @@ function buildAccessUrl(baseUrl: string, rawPath: string): string {
 // 兼容旧调用名（buildImageUrl 现已按类型自动路由，保留别名）
 const buildImageUrl = buildAccessUrl
 
-// 根据 type 选择对应的 CNB 访问 token
+// 根据 type 选择对应的 CNB 访问 token（回退到 CNB_TOKEN）
 function tokenForType(type: UploadType): string | undefined {
-  return type === 'files' ? process.env.TOKEN_FILE : process.env.TOKEN_IMG
+  return getCnbToken(type === 'files' ? process.env.TOKEN_FILE : process.env.TOKEN_IMG)
 }
 
 async function requestUploadMeta(
@@ -109,6 +116,7 @@ async function requestUploadMeta(
   const token = tokenForType(type)
   if (!token) {
     const which = type === 'files' ? 'TOKEN_FILE' : 'TOKEN_IMG'
+    throw new Error(`缺少环境变量 ${which}（或统一配置 CNB_TOKEN）`)
     throw new Error(`缺少环境变量 ${which}`)
   }
   const metaUrl = `https://api.cnb.cool/${process.env.SLUG_IMG}/-/upload/${type}`
@@ -190,9 +198,9 @@ async function signUpload({
 // rawPath 形如 /slug/-/imgs/<ID>/<uuid>.png 或 /slug/-/files/<ID>/<uuid>/<文件名>
 async function deleteFromCnb(rawPath: string) {
   const path = String(rawPath).split(/[?#]/)[0]
-  const token = process.env.TOKEN_DELETE
+  const token = getCnbToken(process.env.TOKEN_DELETE)
   if (!token) {
-    throw new Error('缺少环境变量 TOKEN_DELETE（删除需要 repo-manage:rw 权限的 CNB token）')
+    throw new Error('缺少 TOKEN_DELETE（或统一配置 CNB_TOKEN，删除需 repo-manage:rw 权限）')
   }
   const slug = process.env.SLUG_IMG
   if (!slug) {

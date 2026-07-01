@@ -889,9 +889,10 @@ curl "https://your-domain.com/img-api/ID/uuid.jpg" -o cat.jpg
 | --- | --- |
 | `BASE_IMG_URL` | 站点域名（**结尾带斜杠**） |
 | `SLUG_IMG` | CNB 图床仓库名（如 `user/repo`） |
-| `TOKEN_IMG` | CNB 访问令牌（imgs 读写） |
-| `TOKEN_FILE` | CNB 访问令牌（files 读写，需 `repo-notes:rw`） |
-| `TOKEN_DELETE` | CNB 删除令牌（需 `repo-manage:rw`） |
+| `CNB_TOKEN` | **CNB 统一令牌（推荐，全权限即可）** |
+| `TOKEN_IMG` | CNB 访问令牌（imgs 读写）；可选，覆盖 `CNB_TOKEN` |
+| `TOKEN_FILE` | CNB 访问令牌（files 读写，需 `repo-notes:rw`）；可选 |
+| `TOKEN_DELETE` | CNB 删除令牌（需 `repo-manage:rw`）；可选 |
 | `UPLOAD_PASSWORD` | 登录密码（未设则登录不可用） |
 | `JWT_SECRET` | JWT 签名密钥（**强烈建议独立配置**，`openssl rand -hex 32`） |
 | `KV_ALLOWED_ORIGINS` | `kv-api` CORS 白名单（逗号分隔） |

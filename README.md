@@ -135,8 +135,9 @@ PAGES_SOURCE=skills edgeone pages dev
 | --- | --- | --- |
 | `BASE_IMG_URL` | 图床域名，**结尾必须带斜杠** | `https://img.example.com/` |
 | `SLUG_IMG` | CNB 图床仓库名 | `your-username/your-repo` |
-| `TOKEN_IMG` | CNB token（imgs 读写） | `xxxx` |
-| `TOKEN_FILE` | CNB token（files 读写，需 `repo-notes:rw`） | `xxxx` |
+| `CNB_TOKEN` | **CNB 统一 token（推荐，全权限即可）** | `xxxx` |
+| `TOKEN_IMG` | CNB token（imgs 读写）；可选，覆盖 `CNB_TOKEN` | `xxxx` |
+| `TOKEN_FILE` | CNB token（files 读写，需 `repo-notes:rw`）；可选 | `xxxx` |
 | `TOKEN_DELETE` | CNB token（删除文件，需 `repo-manage:rw`）；可选 | `xxxx` |
 | `UPLOAD_PASSWORD` | 登录密码（未设置则登录接口不可用） | `your-secret-123` |
 | `JWT_SECRET` | **JWT 签名密钥（强烈建议独立设置）**。与登录密码解耦，避免密码泄露即可伪造 token。`openssl rand -hex 32` | `a1b2...(64 字符)` |

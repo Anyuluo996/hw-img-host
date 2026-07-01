@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RouterView, useRouter, useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
-import { Upload, Image, LogOut, Tag, KeyRound } from 'lucide-vue-next'
+import { Upload, Image, LogOut, Tag, KeyRound, Wand2 } from 'lucide-vue-next'
 
 const router = useRouter()
 const route = useRoute()
@@ -68,6 +68,18 @@ function handleLogout() {
           >
             <KeyRound class="h-3.5 w-3.5" />
             密钥
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition"
+            :class="
+              route.name === 'orphan-cleanup'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground'
+            "
+            @click="router.push('/orphan-cleanup')"
+          >
+            <Wand2 class="h-3.5 w-3.5" />
+            清理
           </button>
         </div>
         <button

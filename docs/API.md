@@ -158,10 +158,13 @@ curl -X POST "https://cdn.anyul.cn/api/assets?name=report.pdf&ttl=7d" \
     "public": false,
     "size": 102400,
     "hash": "sha256...",
-    "expiresAt": "2026-07-04T12:00:00.000Z"
+    "expiresAt": "2026-07-04T12:00:00.000Z",
+    "duplicate": false                              // true = 哈希命中，复用了已有记录
   }
 }
 ```
+
+> **哈希去重**：同 service 内已有相同 SHA-256 的 `ready` 记录时，不重复上传 CNB，直接复用已有记录。响应中 `duplicate: true` 表示命中。三阶段上传的 `complete` 阶段也支持去重（命中时删掉刚传的 CNB 文件）。
 
 ### 1.2 上传文件（指定 key）
 

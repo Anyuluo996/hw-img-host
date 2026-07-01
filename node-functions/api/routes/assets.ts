@@ -392,6 +392,43 @@ router.post('/complete', authGate, async (req: AssetReq, res) => {
     const isPublic = body.public === true
     const baseUrl = process.env.BASE_IMG_URL!
     const cnbPath = found.cnbPath || ''
+
+    // 哈希去重（三阶段版）：客户端传了 hash 且同 service 已有相同 hash 的 ready 记录
+    // → 复用已有记录 + 删掉刚传的 CNB 文件（避免新孤儿）。查重失败不阻塞。
+    if (body.hash) {
+      try {
+        const dupRes = await callAssetsEdge(
+          `/check-hash?service=${encodeURIComponent(service)}&hash=${encodeURIComponent(body.hash)}`,
+          { method: 'GET' },
+        )
+        if (dupRes.ok) {
+          const dup = (await dupRes.json()) as {
+            code: number
+            data?: { exists: boolean; record?: { key?: string; cnbPath?: string; size?: number; expiresAt?: string | null } }
+          }
+          if (dup.code === 0 && dup.data?.exists && dup.data.record) {
+            const r = dup.data.record
+            // 删掉本次三阶段传的 CNB 文件（与已有记录重复）
+            if (cnbPath) await deleteFromCnb(cnbPath).catch(() => {})
+            const recordUrl = isPublic && r.cnbPath ? buildAccessUrl(baseUrl, r.cnbPath) : ''
+            return res.json(
+              reply(0, 'ok', {
+                key: `${service}/${r.key || found.key}`,
+                url: recordUrl || null,
+                public: isPublic,
+                size: r.size || body.size,
+                hash: body.hash,
+                expiresAt: r.expiresAt ?? null,
+                duplicate: true,
+              }),
+            )
+          }
+        }
+      } catch {
+        // 查重失败不阻塞
+      }
+    }
+
     const recordUrl = isPublic ? buildAccessUrl(baseUrl, cnbPath) : ''
 
     const now = new Date()
@@ -577,6 +614,40 @@ async function uploadAndIndex(
   const type = detectUploadType(displayName)
   const hash = computeSHA256(buffer)
   const baseUrl = process.env.BASE_IMG_URL!
+
+  // 哈希去重：同 service 内已有相同 hash 的 ready 记录 → 复用，不重复传 CNB。
+  // 查重失败不阻塞上传（网络/KV 异常时降级为正常上传）。
+  try {
+    const dupRes = await callAssetsEdge(
+      `/check-hash?service=${encodeURIComponent(service)}&hash=${encodeURIComponent(hash)}`,
+      { method: 'GET' },
+    )
+    if (dupRes.ok) {
+      const dup = (await dupRes.json()) as {
+        code: number
+        data?: { exists: boolean; record?: { key?: string; url?: string; public?: boolean; cnbPath?: string; size?: number; hash?: string; expiresAt?: string | null } }
+      }
+      if (dup.code === 0 && dup.data?.exists && dup.data.record) {
+        const r = dup.data.record
+        // 复用已有记录：cnbPath/url 不变，按本次请求的 isPublic 决定是否返回公开 URL
+        const recordUrl = isPublic && r.cnbPath ? buildAccessUrl(baseUrl, r.cnbPath) : ''
+        return {
+          ok: true,
+          data: {
+            key: `${service}/${r.key || fileKey}`,
+            url: recordUrl || null,
+            public: isPublic,
+            size: r.size || buffer.length,
+            hash,
+            expiresAt: r.expiresAt ?? null,
+            duplicate: true,
+          },
+        }
+      }
+    }
+  } catch {
+    // 查重失败不阻塞上传
+  }
 
   // 上传到 CNB（复用现有逻辑：图片走 imgs，其余走 files）
   const result = await uploadToCnb({ fileBuffer: buffer, fileName: displayName, type })

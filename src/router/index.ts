@@ -40,6 +40,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/orphan-cleanup',
+      name: 'orphan-cleanup',
+      component: () => import('../views/OrphanCleanupView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       // 秘密登录路径，不主动暴露。
       path: LOGIN_PATH,
       name: 'login',

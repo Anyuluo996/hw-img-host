@@ -687,9 +687,9 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
     ) as string[]
   ).map((s) => decodeURIComponent(s))
 
-  // 索引操作子路由：第一段为 index/check/list
+  // 索引操作子路由：第一段为 index/check/check-hash/list
   const first = pathSegs[0] || ''
-  if (first === 'index' || first === 'check' || first === 'list') {
+  if (first === 'index' || first === 'check' || first === 'check-hash' || first === 'list') {
     return handleIndexOp(req, env, first)
   }
 
@@ -765,6 +765,27 @@ async function handleIndexOp(
       if (!service || !key) return jsonRes({ code: 1, msg: '缺少 service/key' }, 400)
       const rec = await findRecord(service, key)
       return jsonRes({ code: 0, msg: 'ok', data: { exists: !!rec, record: rec || null } })
+    }
+
+    // 哈希查重：扫 asset_{service}_ 前缀，比对每条记录的 hash 字段。
+    // 用于 Assets API 上前去重（同 service 内，命中则复用已有记录不重复传 CNB）。
+    if (op === 'check-hash') {
+      const hash = (url.searchParams.get('hash') || '').trim()
+      if (!service || !hash) return jsonRes({ code: 1, msg: '缺少 service/hash' }, 400)
+      // 从聚合索引快速查找（比翻页扫 asset_ keys 快）
+      const items = await getIndex(service)
+      const now = Date.now()
+      const hit = items.find(
+        (it) =>
+          it.hash === hash &&
+          it.status !== 'uploading' && // 跳过未完成的三阶段上传
+          (!it.expiresAt || new Date(it.expiresAt).getTime() >= now), // 跳过已过期
+      )
+      return jsonRes({
+        code: 0,
+        msg: 'ok',
+        data: { exists: !!hit, record: hit || null },
+      })
     }
 
     if (op === 'list') {

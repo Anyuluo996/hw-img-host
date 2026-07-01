@@ -268,6 +268,38 @@ async function mutateIndex(service, fn) {
 
 ---
 
+## Assets 哈希去重
+
+### 机制
+
+Assets API（`POST /api/assets`、`PUT`、`POST /upload`、三阶段 `complete`）上传前算 SHA-256，查同 service 内是否有相同 hash 的 `ready` 记录。命中则**不传 CNB**，直接复用已有记录的 `cnbPath`/`url`。
+
+```
+上传请求 → 算 SHA-256 → GET /assets-api/check-hash?service=&hash=
+                           │
+                           ├─ 命中（exists:true）→ 复用已有记录，返回 duplicate:true
+                           │                       （三阶段 complete 额外删掉刚传的 CNB 文件）
+                           │
+                           └─ 未命中 → 正常上传 CNB + 写索引
+```
+
+### 与图库去重的区别
+
+| | 图库（kv-api） | Assets（assets-api） |
+| --- | --- | --- |
+| 查重端点 | `GET /kv-api/check?hash=` | `GET /assets-api/check-hash?service=&hash=` |
+| 扫描范围 | `img_*`（全局） | `asset_{service}_`（**同 service 内**） |
+| 命中行为 | 复用链接，不上传 | 复用记录，不上传（三阶段删 CNB 文件） |
+
+### 设计权衡
+
+- **同 service 内去重**：Assets 强隔离，跨 service 去重无意义（不同 service 可能有意存同一文件的不同副本）
+- **查重失败不阻塞**：网络/KV 异常时降级为正常上传（与图库 `checkDuplicateByHash` 同策略）
+- **三阶段 complete 去重**：文件已传到 CNB（孤儿），命中时调 `deleteFromCnb` 清理
+- **边缘函数 assets-upload 不去重**：算 SHA-256 需读完整文件到内存，与流式上传矛盾
+
+---
+
 ## node ↔ 边缘函数 委托模式
 
 Node Function **无法直接访问** EdgeOne 的 KV 绑定（`img_kv`）。所有 KV 读写都通过 HTTP 委托给边缘函数 `assets-api`。

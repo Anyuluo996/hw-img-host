@@ -25,6 +25,7 @@
   - [1.7 删除文件](#17-删除文件)
   - [1.8 私有下载](#18-私有下载)
   - [1.9 TTL 自动过期](#19-ttl-自动过期)
+  - [1.10 孤儿文件清理（管理员维护）](#110-孤儿文件清理管理员维护)
 - [二、密钥管理 API](#二密钥管理-api)
 - [三、图床管理 API（前端用）](#三图床管理-api前端用)
   - [3.1 登录](#31-登录)
@@ -481,6 +482,90 @@ curl "https://cdn.anyul.cn/assets-api/koishi/big.mp4" \
 | `0` | **永不过期** |
 
 > 格式非法时回退默认 1 天。
+
+### 1.10 孤儿文件清理（管理员维护）
+
+手动清理孤儿文件（CNB 上有文件但无索引/已过期）。**JWT 鉴权**（图床登录态，非 X-API-Key）。
+
+> 懒删除依赖 service 有流量才触发。低频 service 的孤儿可用这些端点主动清理。
+> 详见 [MECHANISM.md 孤儿自愈](./MECHANISM.md#孤儿自愈)。
+
+#### 单 service 清理
+
+**POST** `/api/assets/sweep?service=<name>`
+
+清理指定 service 的过期记录（删 KV 记录 + CNB 文件）。
+
+```bash
+curl -X POST "https://cdn.anyul.cn/api/assets/sweep?service=koishi" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+```jsonc
+{ "code": 0, "msg": "ok", "data": { "service": "koishi", "cleaned": 3 } }
+```
+
+#### 全 service 清理
+
+**POST** `/api/assets/sweep-all`
+
+扫描所有 service（`aidx_*` 聚合索引键），逐个清理过期记录。
+
+```bash
+curl -X POST "https://cdn.anyul.cn/api/assets/sweep-all" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+```jsonc
+{
+  "code": 0, "msg": "ok",
+  "data": {
+    "services": 5, "cleaned": 12,
+    "details": [{ "service": "koishi", "cleaned": 3 }, /* ... */ ]
+  }
+}
+```
+
+#### CNB 对账
+
+**POST** `/api/assets/reconcile?mode=dry-run|delete`
+
+拉取 CNB 全量文件清单，与 KV 索引比对，找出 **CNB 有但 KV 无**的孤儿文件。
+
+| mode | 行为 |
+| --- | --- |
+| `dry-run`（默认） | 只报告孤儿列表，不删除 |
+| `delete` | 删除孤儿 CNB 文件 |
+
+```bash
+# 先 dry-run 看有哪些孤儿
+curl -X POST "https://cdn.anyul.cn/api/assets/reconcile?mode=dry-run" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+```jsonc
+{
+  "code": 0, "msg": "对账完成（dry-run）",
+  "data": {
+    "cnbTotal": 150,      // CNB 侧文件总数
+    "kvTotal": 145,       // KV 索引记录总数
+    "orphans": [           // CNB 有但 KV 无的孤儿路径
+      "/slug/-/imgs/ID/uuid.jpg",
+      "/slug/-/files/ID/uuid/report.pdf"
+    ],
+    "deleted": 0           // dry-run 不删
+  }
+}
+```
+
+```bash
+# 确认 orphans 合理后，执行删除
+curl -X POST "https://cdn.anyul.cn/api/assets/reconcile?mode=delete" \
+  -H "Authorization: Bearer <jwt>"
+# → { ..., "deleted": 5 }
+```
+
+> ⚠️ `reconcile` 需分页拉取 CNB 全量清单，文件多时较慢（数十秒）。`mode=delete` 前建议先 `dry-run` 确认。
 
 ---
 

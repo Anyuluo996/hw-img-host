@@ -157,6 +157,31 @@ sign 预写 pending（cnbPath + 1h TTL）
 - **最终一致**：清理是惰性的，不保证 1h 精确清理，但保证最终清理（只要该 service 有活动）。极端静默 service 的孤儿会残留，但存储成本低可接受。
 - **PENDING_TTL = 1h**：覆盖大多数大文件上传窗口（几百 MB 视频在普通带宽下几分钟完成）。可调（`assets.ts` 的 `PENDING_TTL_MS`）。
 
+### 手动清理
+
+懒删除依赖 service 有流量才触发。低频/静默 service 的孤儿会残留。提供三个手动清理端点（**JWT 鉴权**，仅管理员可调）：
+
+| 端点 | 作用 | 清理范围 |
+| --- | --- | --- |
+| `POST /api/assets/sweep?service=` | 单 service 清理过期记录 | KV 记录 + 聚合索引项 + CNB 文件 |
+| `POST /api/assets/sweep-all` | 扫描所有 service（`aidx_*`）清理 | 同上，跨 service |
+| `POST /api/assets/reconcile?mode=dry-run` | CNB 对账（只报告孤儿） | 不删，返回孤儿列表 |
+| `POST /api/assets/reconcile?mode=delete` | CNB 对账（删孤儿文件） | 删 CNB 有但 KV 无的文件 |
+
+**sweep / sweep-all**：复用 `sweepExpired`，扫描索引中 `expiresAt < now` 的记录，双删（KV + CNB）。
+
+**reconcile（CNB 对账）**：最彻底的清理。拉 CNB `list-assets` 全量清单 vs KV `asset_*` 记录，找出 **CNB 有但 KV 无**的孤儿文件（包括 `rebuildAssetIndex` 历史泄漏的、手动删了索引但没删 CNB 的等）。`dry-run` 只报告，`delete` 删除。
+
+> ⚠️ `rebuildAssetIndex` 曾有泄漏（从聚合索引移除过期项但不删 KV 记录和 CNB 文件），已修复为双删。reconcile 可清理历史泄漏残留。
+
+```bash
+# 全量清理（先 sweep 过期记录，再 reconcile CNB 孤儿）
+curl -X POST "https://cdn.anyul.cn/api/assets/sweep-all" -H "Authorization: Bearer <jwt>"
+curl -X POST "https://cdn.anyul.cn/api/assets/reconcile?mode=dry-run" -H "Authorization: Bearer <jwt>"
+# 确认 orphans 列表合理后
+curl -X POST "https://cdn.anyul.cn/api/assets/reconcile?mode=delete" -H "Authorization: Bearer <jwt>"
+```
+
 ---
 
 ## TTL 懒删除

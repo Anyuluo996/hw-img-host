@@ -270,7 +270,10 @@ function extractKeyNames(result: unknown): { names: string[]; complete: boolean;
   return { names: [], complete: true }
 }
 
-async function rebuildAssetIndex(service: string): Promise<{ total: number }> {
+async function rebuildAssetIndex(
+  service: string,
+  env: Record<string, string | undefined>,
+): Promise<{ total: number; cleaned: number }> {
   const kv = getKV()
   const prefix = `asset_${service}_`
   const allKeys: string[] = []
@@ -297,15 +300,27 @@ async function rebuildAssetIndex(service: string): Promise<{ total: number }> {
       }
     }),
   )
+  const expired = items.filter(
+    (it): it is AssetRecord =>
+      !!it && !!it.expiresAt && new Date(it.expiresAt).getTime() < now,
+  )
   const live = items.filter((it): it is AssetRecord => {
     if (!it) return false
-    // 重建时顺手清掉已过期记录（与懒删除一致）
     if (it.expiresAt && new Date(it.expiresAt).getTime() < now) return false
     return true
   })
+  // 对过期项执行双删：删 KV 记录 + 删 CNB 文件（修复旧版只移除索引项的泄漏）
+  if (expired.length > 0) {
+    await Promise.all(
+      expired.map(async (r) => {
+        await kv.delete(recordKey(r.service, r.key)).catch(() => {})
+        if (r.cnbPath) await deleteCnbFile(r.cnbPath, env).catch(() => {})
+      }),
+    )
+  }
   // 高 ver 写回，压过任何并发旧写
   await setIndexState(service, { ver: Date.now(), items: live })
-  return { total: live.length }
+  return { total: live.length, cleaned: expired.length }
 }
 
 interface AssetRecord {
@@ -398,6 +413,127 @@ async function sweepExpired(
     // 索引写冲突：实际 KV 记录已删，索引会在下次 rebuild 自愈，不阻塞流程
   }
   return expired.length
+}
+
+// 扫描所有 service（aidx_* 聚合索引键），逐个调 sweepExpired。
+// 解决低频/静默 service 的孤儿永远不被清理的问题。
+async function sweepAllServices(
+  env: Record<string, string | undefined>,
+): Promise<{ services: number; cleaned: number; details: Array<{ service: string; cleaned: number }> }> {
+  const kv = getKV()
+  // 翻页收集所有 aidx_ 前缀的 key
+  const allKeys: string[] = []
+  let cursor: string | undefined
+  let guard = 0
+  do {
+    if (guard++ > 50) break
+    const opts: { prefix: string; limit: number; cursor?: string } = { prefix: 'aidx_', limit: 256 }
+    if (cursor) opts.cursor = cursor
+    const result = await kv.list(opts)
+    const parsed = extractKeyNames(result)
+    allKeys.push(...parsed.names)
+    cursor = parsed.complete ? undefined : parsed.cursor
+  } while (cursor)
+
+  // 从 key 名提取 service：aidx_{service} → {service}
+  const services = allKeys.map((k) => k.replace(/^aidx_/, '')).filter(Boolean)
+
+  // 逐 service 清理（并行）
+  const details = await Promise.all(
+    services.map(async (service) => ({
+      service,
+      cleaned: await sweepExpired(service, env).catch(() => 0),
+    })),
+  )
+  const cleaned = details.reduce((sum, d) => sum + d.cleaned, 0)
+  return { services: services.length, cleaned, details }
+}
+
+// CNB 对账：拉 CNB list-assets 全量清单 vs KV asset_* 记录，
+// 找出 CNB 有但 KV 无的孤儿文件（rebuild 泄漏 / 手动删了索引但没删 CNB 等）。
+// mode='dry-run' 只报告；mode='delete' 删孤儿。
+async function reconcileCnb(
+  env: Record<string, string | undefined>,
+  mode: 'dry-run' | 'delete',
+): Promise<{ cnbTotal: number; kvTotal: number; orphans: string[]; deleted: number }> {
+  const token = env.TOKEN_DELETE
+  const slug = env.SLUG_IMG
+  if (!token || !slug) {
+    return { cnbTotal: 0, kvTotal: 0, orphans: [], deleted: 0 }
+  }
+
+  // 1. 拉取 CNB 侧全量清单（分页 list-assets）
+  const cnbPaths = new Set<string>()
+  let page = 1
+  let hasMore = true
+  let pageGuard = 0
+  while (hasMore && pageGuard++ < 100) {
+    const listUrl = `https://api.cnb.cool/${slug}/-/list-assets?page=${page}&page_size=200`
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 15000)
+    try {
+      const resp = await fetch(listUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      if (!resp.ok) break
+      const data = (await resp.json()) as Array<{ path?: string }> | { data?: Array<{ path?: string }> }
+      const records = Array.isArray(data) ? data : data?.data || []
+      if (records.length === 0) {
+        hasMore = false
+        break
+      }
+      for (const r of records) {
+        if (r.path) cnbPaths.add(r.path)
+      }
+      // 不足一页 = 最后一页
+      if (records.length < 200) hasMore = false
+      else page++
+    } catch {
+      break
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  // 2. 拉取 KV 侧全量 cnbPath（翻页 asset_ 前缀）
+  const kv = getKV()
+  const kvPaths = new Set<string>()
+  let kvCursor: string | undefined
+  let kvGuard = 0
+  do {
+    if (kvGuard++ > 100) break
+    const opts: { prefix: string; limit: number; cursor?: string } = { prefix: 'asset_', limit: 256 }
+    if (kvCursor) opts.cursor = kvCursor
+    const result = await kv.list(opts)
+    const parsed = extractKeyNames(result)
+    // 批量 get 提取 cnbPath
+    await Promise.all(
+      parsed.names.map(async (k) => {
+        try {
+          const v = (await kv.get(k, 'json')) as AssetRecord | null
+          if (v?.cnbPath) kvPaths.add(v.cnbPath)
+        } catch {
+          /* skip */
+        }
+      }),
+    )
+    kvCursor = parsed.complete ? undefined : parsed.cursor
+  } while (kvCursor)
+
+  // 3. 比对：CNB 有但 KV 无 = 孤儿
+  const orphans = [...cnbPaths].filter((p) => !kvPaths.has(p))
+
+  // 4. mode='delete' 时删孤儿
+  let deleted = 0
+  if (mode === 'delete' && orphans.length > 0) {
+    const results = await Promise.all(
+      orphans.map((path) => deleteCnbFile(path, env).catch(() => false)),
+    )
+    deleted = results.filter(Boolean).length
+  }
+
+  return { cnbTotal: cnbPaths.size, kvTotal: kvPaths.size, orphans, deleted }
 }
 
 // ============ 密钥管理（KV 存储，页面增删即时生效）============
@@ -537,6 +673,11 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
     return handleIndexOp(req, env, first)
   }
 
+  // 维护操作子路由：sweep / sweep-all / reconcile（JWT 鉴权，管理员操作）
+  if (first === 'sweep' || first === 'sweep-all' || first === 'reconcile') {
+    return handleMaintenance(req, env, first)
+  }
+
   // 密钥管理子路由：keys / resolve-service（JWT 鉴权，node 内部调用）
   if (first === 'keys' || first === 'resolve-service') {
     return handleKeysOp(req, env, first, pathSegs.slice(1))
@@ -578,7 +719,7 @@ async function handleIndexOp(
         if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
         // 重建单独 catch：暴露真实错误，便于运维定位（外层 catch 会吞成"索引操作失败"）
         try {
-          const r = await rebuildAssetIndex(service)
+          const r = await rebuildAssetIndex(service, env)
           return jsonRes({ code: 0, msg: '聚合索引已重建', data: r })
         } catch (e) {
           return jsonRes({ code: 1, msg: '重建失败: ' + (e as Error).message }, 500)
@@ -616,7 +757,7 @@ async function handleIndexOp(
       // 版本号+重试挡不住最终一致窗口内的极端竞态，重建保证最终一致。
       // 低频中转场景下 ~5% 请求多花 ~1.5s，可接受。
       if (Math.floor(Math.random() * 20) === 0) {
-        await rebuildAssetIndex(service).catch(() => {})
+        await rebuildAssetIndex(service, env).catch(() => {})
       }
       let items = await getIndex(service)
       // 双保险：再过滤一次已过期（防止 sweep 与 list 间的竞态）
@@ -628,8 +769,55 @@ async function handleIndexOp(
     }
 
     return emptyRes(404)
-  } catch (e) {
+  } catch {
     return jsonRes({ code: 1, msg: '索引操作失败' }, 500)
+  }
+}
+
+// ============ 维护操作（JWT 鉴权，管理员调用）============
+//
+// POST /assets-api/sweep?service=<name>   单 service 清理过期记录（= sweepExpired）
+// POST /assets-api/sweep-all              扫所有 service 清理
+// POST /assets-api/reconcile?mode=dry-run CNB 对账（只报告孤儿）
+// POST /assets-api/reconcile?mode=delete  CNB 对账（删孤儿文件）
+
+async function handleMaintenance(
+  req: Request,
+  env: Record<string, string | undefined>,
+  op: string,
+): Promise<Response> {
+  // JWT 鉴权（同 handleIndexOp）
+  const authHeader = req.headers.get('Authorization')
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return emptyRes(401)
+  const secret = env.JWT_SECRET || env.UPLOAD_PASSWORD
+  if (!secret) return emptyRes(500)
+  const ok = await verifyJwt(authHeader.slice(7), secret)
+  if (!ok) return emptyRes(401)
+
+  const url = new URL(req.url)
+
+  try {
+    if (op === 'sweep') {
+      const service = (url.searchParams.get('service') || '').trim()
+      if (!service) return jsonRes({ code: 1, msg: '缺少 service' }, 400)
+      const cleaned = await sweepExpired(service, env)
+      return jsonRes({ code: 0, msg: 'ok', data: { service, cleaned } })
+    }
+
+    if (op === 'sweep-all') {
+      const result = await sweepAllServices(env)
+      return jsonRes({ code: 0, msg: 'ok', data: result })
+    }
+
+    if (op === 'reconcile') {
+      const mode = url.searchParams.get('mode') === 'delete' ? 'delete' : 'dry-run'
+      const result = await reconcileCnb(env, mode)
+      return jsonRes({ code: 0, msg: mode === 'delete' ? '对账完成' : '对账完成（dry-run）', data: result })
+    }
+
+    return emptyRes(404)
+  } catch (e) {
+    return jsonRes({ code: 1, msg: '维护操作失败: ' + (e as Error).message }, 500)
   }
 }
 

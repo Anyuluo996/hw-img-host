@@ -14,6 +14,7 @@ import {
 import { reply } from '../_reply'
 import { sanitizeFileName, MAX_FILE_SIZE } from '../_validation'
 import { checkApiKey, deny } from '../_assets_auth'
+import { authMiddleware } from '../_auth'
 
 // Assets 中转 API：供自己的服务（koishi 等）以程序化方式上传/下载/管理文件。
 //
@@ -191,6 +192,53 @@ async function callAssetsEdge(path: string, init: RequestInit): Promise<globalTh
     clearTimeout(timeoutId)
   }
 }
+
+// ============ 管理员维护端点（JWT 鉴权，非 X-API-Key）============
+// 供运维/前端管理页面手动清理孤儿文件。委托边缘 assets-api 的维护子路由。
+//
+// POST /sweep?service=<name>   清理单 service 过期记录
+// POST /sweep-all              清理所有 service 过期记录
+// POST /reconcile?mode=dry-run CNB 对账（只报告孤儿）
+// POST /reconcile?mode=delete  CNB 对账（删孤儿文件）
+
+router.post('/sweep', authMiddleware, async (req: AssetReq, res) => {
+  try {
+    const service = (req.query.service as string) || ''
+    if (!service) return res.status(400).json(reply(1, '缺少 service'))
+    const r = await callAssetsEdge(`/sweep?service=${encodeURIComponent(service)}`, {
+      method: 'POST',
+    })
+    if (!r.ok) return res.status(502).json(reply(1, '清理失败'))
+    return res.json((await r.json()) as ReturnType<typeof reply>)
+  } catch (e) {
+    console.error('assets /sweep 失败:', (e as Error).message)
+    return res.status(500).json(reply(1, '清理失败'))
+  }
+})
+
+router.post('/sweep-all', authMiddleware, async (_req: AssetReq, res) => {
+  try {
+    const r = await callAssetsEdge('/sweep-all', { method: 'POST' })
+    if (!r.ok) return res.status(502).json(reply(1, '清理失败'))
+    return res.json((await r.json()) as ReturnType<typeof reply>)
+  } catch (e) {
+    console.error('assets /sweep-all 失败:', (e as Error).message)
+    return res.status(500).json(reply(1, '清理失败'))
+  }
+})
+
+router.post('/reconcile', authMiddleware, async (req: AssetReq, res) => {
+  try {
+    const mode = req.query.mode === 'delete' ? 'delete' : 'dry-run'
+    // reconcile 可能较慢（分页拉 CNB 全量清单），放宽超时
+    const r = await callAssetsEdge(`/reconcile?mode=${mode}`, { method: 'POST' })
+    if (!r.ok) return res.status(502).json(reply(1, '对账失败'))
+    return res.json((await r.json()) as ReturnType<typeof reply>)
+  } catch (e) {
+    console.error('assets /reconcile 失败:', (e as Error).message)
+    return res.status(500).json(reply(1, '对账失败'))
+  }
+})
 
 // ============ 大文件三阶段上传：sign → 客户端 PUT upload-proxy → complete ============
 // 突破 node-function ~6MB body 限制：sign 预写 pending 索引（1h TTL，孤儿自动清 CNB），

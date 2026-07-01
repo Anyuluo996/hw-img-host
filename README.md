@@ -219,6 +219,7 @@ hw-img-host/
 | [docs/API.md](./docs/API.md) | HTTP API 完整参考（Assets 中转 API、图床管理 API、公开访问端点、错误码） |
 | [docs/MECHANISM.md](./docs/MECHANISM.md) | 机制原理（三阶段上传、孤儿自愈、TTL 懒删除、乐观并发、EdgeOne 平台约束） |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | 开发指南（环境搭建、本地开发、代码规范、平台边界、调试技巧、部署、测试） |
+| [docs/CNB.md](./docs/CNB.md) | CNB 对象存储开发参考（三域名分工、Token 权限、上传/删除/访问、imgs vs files、已知怪癖） |
 | [AGENTS.md](./AGENTS.md) | Agent 开发指南（包管理器、命令、架构、代码约定） |
 
 <!-- build trigger 1782514178 -->

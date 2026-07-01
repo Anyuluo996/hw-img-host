@@ -1,7 +1,7 @@
 # 开发指南
 
 本文档面向 hw-img-host 的开发者,覆盖环境搭建、本地开发、代码规范、平台边界与调试技巧。
-API 用法见 [API.md](./API.md),机制原理见 [MECHANISM.md](./MECHANISM.md)。
+API 用法见 [API.md](./API.md),机制原理见 [MECHANISM.md](./MECHANISM.md),CNB 存储开发参考见 [CNB.md](./CNB.md)。
 
 ---
 

@@ -129,6 +129,40 @@ async function resolveService(
   return null
 }
 
+// 从 cnbPath 提取 CNB DELETE 需要的子路径（与 assets-api 同逻辑）
+function extractCnbSubPath(cnbPath: string): string {
+  const path = String(cnbPath).split(/[?#]/)[0]
+  const match = path.match(/-\/(?:imgs|files)\/(.+)/)
+  return match ? match[1] : path
+}
+
+// 调 CNB DELETE API 删除文件（KV 失败回滚用）。失败不抛，返回是否成功。
+async function deleteCnbFile(
+  cnbPath: string,
+  env: Record<string, string | undefined>,
+): Promise<boolean> {
+  const token = env.TOKEN_DELETE
+  const slug = env.SLUG_IMG
+  if (!token || !slug) return false
+  const subPath = extractCnbSubPath(cnbPath)
+  const isImgs = cnbPath.includes('/-/imgs/')
+  const deleteUrl = `https://api.cnb.cool/${slug}/-/${isImgs ? 'imgs' : 'files'}/${subPath}`
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 15000)
+  try {
+    const resp = await fetch(deleteUrl, {
+      method: 'DELETE',
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return resp.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 // ============ 主入口 ============
 
 export async function onRequest(context: EdgeContext): Promise<Response> {
@@ -249,12 +283,12 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
 
     // 3. 直接写 KV 索引（共享 img_kv 绑定，不经 HTTP 回环）
     //    单条记录 asset_{service}_{key} + 聚合索引 aidx_{service}（append）。
-    //    聚合索引用乐观并发（与 assets-api 同机制），失败则仅写单条记录
-    //    （list 的 rebuild 兜底会自愈聚合索引）。
+    //    聚合索引用乐观并发（读→改→重读校验 ver→写），与 assets-api.mutateIndex 同构。
+    //    KV 完全不可用时回滚：删掉已上传的 CNB 文件（避免静默孤儿）。
     try {
       const kv = getKV()
       await kv.put(`asset_${service}_${fileKey}`, JSON.stringify(record))
-      // 聚合索引：读改写 append（3 次重试，与 assets-api.mutateIndex 同构）
+      // 聚合索引：乐观并发 append（ver 校验 + 3 次重试）
       let appended = false
       for (let attempt = 0; attempt < 3; attempt++) {
         const idxRaw = (await kv.get(`aidx_${service}`, 'json').catch(() => null)) as
@@ -267,17 +301,27 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
           state = idxRaw as { ver: number; items: unknown[] }
         else state = { ver: 0, items: [] }
 
+        // 写前重读校验 ver：变了说明有人写过，放弃本次重读
+        const fresh = (await kv.get(`aidx_${service}`, 'json').catch(() => null)) as
+          | { ver?: number }
+          | null
+        if (fresh && typeof fresh.ver === 'number' && fresh.ver !== state.ver) {
+          continue // 版本变了，重试
+        }
+
         const next = [...state.items, record]
         await kv.put(`aidx_${service}`, JSON.stringify({ ver: state.ver + 1, items: next }))
         appended = true
         break
       }
       if (!appended) {
-        // 聚合索引写失败不阻塞（rebuild 兜底会自愈），但记录已落 KV
-        console.error('assets-upload: 聚合索引 append 失败，单条记录已写入')
+        // 聚合索引写失败不阻塞（rebuild 兜底会自愈），但单条记录已落 KV
+        console.error('assets-upload: 聚合索引 append 重试耗尽，单条记录已写入')
       }
     } catch {
-      return jsonRes({ code: 1, msg: '已上传但索引失败' }, 500)
+      // KV 完全不可用：回滚已上传的 CNB 文件，避免静默孤儿
+      await deleteCnbFile(cnbPath, env).catch(() => {})
+      return jsonRes({ code: 1, msg: '索引写入失败，已回滚' }, 500)
     }
 
     const data = {

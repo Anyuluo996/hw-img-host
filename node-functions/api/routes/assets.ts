@@ -157,8 +157,9 @@ function parseTtl(ttlRaw: string | undefined): string | null {
 }
 
 // pending 索引的孤儿清理窗口：sign 预写一条带此 TTL 的记录，
-// 客户端若 1h 内未调 complete，下次该 service 有活动时 sweepExpired 会删 KV 记录 + CNB 文件。
-const PENDING_TTL_MS = 60 * 60 * 1000
+// 客户端若此时间内未调 complete，下次该 service 有活动时 sweepExpired 会删 KV 记录 + CNB 文件。
+// 2h 覆盖大多数大文件上传窗口（含网络波动重试），同时不让孤儿占用太久。
+const PENDING_TTL_MS = 2 * 60 * 60 * 1000
 
 // 从 CNB upload_url 提取上传 token。upload_url 形如 https://asset.cnb.cool/assets/t/<token>
 // 拼出客户端可用的边缘代理直传 URL（不经 node 内存，突破 6MB 限制）。
@@ -385,7 +386,16 @@ router.post('/complete', authGate, async (req: AssetReq, res) => {
       }
     }
     const found = listData.data?.items?.find((it) => it.sessionId === body.sessionId)
-    if (!found) return res.status(404).json(reply(1, '会话不存在或已过期'))
+    if (!found) {
+      return res
+        .status(404)
+        .json(
+          reply(
+            1,
+            '会话不存在或已过期（超 2h 未完成，文件可能已被自动清理，请重新上传）',
+          ),
+        )
+    }
 
     // 文件已在 upload-proxy 阶段落到 CNB，这里只复写索引：补全 size/hash/mime，
     // 定稿 TTL，标记 ready。cnbPath 从 pending 记录继承。

@@ -1,7 +1,15 @@
 import { Router } from 'express'
 import jwt from 'jsonwebtoken'
 import { reply } from '../_reply'
-import { getSecret, verifyPassword, authMiddleware } from '../_auth'
+import {
+  getSecret,
+  verifyPassword,
+  authMiddleware,
+  getClientIp,
+  checkRateLimit,
+  recordFailedAttempt,
+  clearRateLimit,
+} from '../_auth'
 
 const router = Router()
 
@@ -10,11 +18,26 @@ router.post('/login', (req, res) => {
     return res.status(400).json(reply(1, '服务器未配置上传密码'))
   }
 
+  // 后端限速：基于 IP 的失败计数（前端 2s 冷却只挡浏览器，curl 无阻碍）
+  const ip = getClientIp(req)
+  const remaining = checkRateLimit(ip)
+  if (remaining === 0) {
+    res.set('Retry-After', '900') // 15 分钟
+    return res.status(429).json(reply(1, '尝试过于频繁，请 15 分钟后再试'))
+  }
+
   const { password } = req.body as { password?: string }
 
   if (!password || !verifyPassword(password)) {
-    return res.status(401).json(reply(1, '密码错误'))
+    recordFailedAttempt(ip)
+    const left = checkRateLimit(ip)
+    return res.status(401).json(
+      reply(1, left > 0 ? `密码错误，剩余 ${left} 次尝试` : '密码错误，已限速'),
+    )
   }
+
+  // 成功：清除限速计数
+  clearRateLimit(ip)
 
   // JWT 用独立密钥签名（getSecret 优先 JWT_SECRET），与登录密码解耦：
   // 密码泄露不再能伪造 token，token 也不能反推密码。

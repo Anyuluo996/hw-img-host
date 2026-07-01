@@ -496,49 +496,81 @@ async function reconcileCnb(
     }
   }
 
-  // 2. 拉取 KV 侧全量路径（从聚合索引读取，避免逐条 get 上千条记录超时）
-  //    assets 系统：扫 aidx_{service} 聚合索引 → 每条 cnbPath
-  //    图库系统：读 idx_all 聚合索引 → 每条 assetsPath
+  // 2. 拉取 KV 侧全量路径
+  //    dry-run：从聚合索引读取（快，但可能 stale → 有少量假阳性，dry-run 可接受）
+  //    delete：从每条独立记录读取（慢，但是真相源 → 绝不误删真实文件）
   //    统一去前导 / 后存入集合（CNB list-assets 返回的 path 无前导 /）
   const normPath = (p: string) => p.replace(/^\//, '')
   const kv = getKV()
   const kvPaths = new Set<string>()
 
-  // assets 系统：翻页扫 aidx_ 前缀，每个聚合索引含 items[]（每条有 cnbPath）
-  let aidxCursor: string | undefined
-  let aidxGuard = 0
-  do {
-    if (aidxGuard++ > 50) break
-    const opts: { prefix: string; limit: number; cursor?: string } = { prefix: 'aidx_', limit: 256 }
-    if (aidxCursor) opts.cursor = aidxCursor
-    const result = await kv.list(opts)
-    const parsed = extractKeyNames(result)
-    for (const k of parsed.names) {
-      try {
-        const v = (await kv.get(k, 'json')) as { items?: Array<{ cnbPath?: string }> } | null
-        if (v?.items) {
-          for (const it of v.items) {
-            if (it.cnbPath) kvPaths.add(normPath(it.cnbPath))
+  // 辅助：翻页扫描某前缀的独立记录，逐条 get 提取 path（真相源，准确但慢）
+  async function scanRecordPaths(prefix: string, extractPath: (v: Record<string, unknown>) => string | undefined) {
+    let cursor: string | undefined
+    let guard = 0
+    do {
+      if (guard++ > 200) break
+      const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 256 }
+      if (cursor) opts.cursor = cursor
+      const result = await kv.list(opts)
+      const parsed = extractKeyNames(result)
+      await Promise.all(
+        parsed.names.map(async (k) => {
+          try {
+            const v = (await kv.get(k, 'json')) as Record<string, unknown> | null
+            if (v) {
+              const p = extractPath(v)
+              if (p) kvPaths.add(normPath(p))
+            }
+          } catch {
+            /* skip */
           }
-        }
-      } catch {
-        /* skip */
-      }
-    }
-    aidxCursor = parsed.complete ? undefined : parsed.cursor
-  } while (aidxCursor)
+        }),
+      )
+      cursor = parsed.complete ? undefined : parsed.cursor
+    } while (cursor)
+  }
 
-  // 图库系统：idx_all 一次 get（聚合索引含全部图库记录）
-  try {
-    const idxAll = (await kv.get('idx_all', 'json')) as Array<Record<string, unknown>> | null
-    if (Array.isArray(idxAll)) {
-      for (const it of idxAll) {
-        const p = (it.assetsPath || it.urlOriginal) as string | undefined
-        if (p) kvPaths.add(normPath(p))
+  if (mode === 'delete') {
+    // 删除模式：必须用真相源（独立记录），聚合索引可能 stale 导致误删
+    await scanRecordPaths('asset_', (v) => v.cnbPath as string | undefined)
+    await scanRecordPaths('img_', (v) => (v.assetsPath || v.urlOriginal) as string | undefined)
+  } else {
+    // dry-run：用聚合索引（快），假阳性无害（只报告不删）
+    let aidxCursor: string | undefined
+    let aidxGuard = 0
+    do {
+      if (aidxGuard++ > 50) break
+      const opts: { prefix: string; limit: number; cursor?: string } = { prefix: 'aidx_', limit: 256 }
+      if (aidxCursor) opts.cursor = aidxCursor
+      const result = await kv.list(opts)
+      const parsed = extractKeyNames(result)
+      for (const k of parsed.names) {
+        try {
+          const v = (await kv.get(k, 'json')) as { items?: Array<{ cnbPath?: string }> } | null
+          if (v?.items) {
+            for (const it of v.items) {
+              if (it.cnbPath) kvPaths.add(normPath(it.cnbPath))
+            }
+          }
+        } catch {
+          /* skip */
+        }
       }
+      aidxCursor = parsed.complete ? undefined : parsed.cursor
+    } while (aidxCursor)
+
+    try {
+      const idxAll = (await kv.get('idx_all', 'json')) as Array<Record<string, unknown>> | null
+      if (Array.isArray(idxAll)) {
+        for (const it of idxAll) {
+          const p = (it.assetsPath || it.urlOriginal) as string | undefined
+          if (p) kvPaths.add(normPath(p))
+        }
+      }
+    } catch {
+      /* idx_all 不存在或读取失败，跳过 */
     }
-  } catch {
-    /* idx_all 不存在或读取失败，跳过 */
   }
 
   // 3. 比对：CNB 有但两个 KV namespace 都无 = 孤儿

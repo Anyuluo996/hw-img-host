@@ -496,45 +496,50 @@ async function reconcileCnb(
     }
   }
 
-  // 2. 拉取 KV 侧全量路径（两个 namespace 都要扫，否则图库图片被误判为孤儿）
-  //    asset_* （assets 系统）：取 cnbPath
-  //    img_*   （图库系统）：取 assetsPath / urlOriginal
+  // 2. 拉取 KV 侧全量路径（从聚合索引读取，避免逐条 get 上千条记录超时）
+  //    assets 系统：扫 aidx_{service} 聚合索引 → 每条 cnbPath
+  //    图库系统：读 idx_all 聚合索引 → 每条 assetsPath
   //    统一去前导 / 后存入集合（CNB list-assets 返回的 path 无前导 /）
   const normPath = (p: string) => p.replace(/^\//, '')
   const kv = getKV()
   const kvPaths = new Set<string>()
 
-  // 辅助：翻页扫描某前缀，对每条记录提取 path 字段加入集合
-  async function scanKvPrefix(prefix: string, extractPath: (v: Record<string, unknown>) => string | undefined) {
-    let cursor: string | undefined
-    let guard = 0
-    do {
-      if (guard++ > 200) break
-      const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 256 }
-      if (cursor) opts.cursor = cursor
-      const result = await kv.list(opts)
-      const parsed = extractKeyNames(result)
-      await Promise.all(
-        parsed.names.map(async (k) => {
-          try {
-            const v = (await kv.get(k, 'json')) as Record<string, unknown> | null
-            if (v) {
-              const p = extractPath(v)
-              if (p) kvPaths.add(normPath(p))
-            }
-          } catch {
-            /* skip */
+  // assets 系统：翻页扫 aidx_ 前缀，每个聚合索引含 items[]（每条有 cnbPath）
+  let aidxCursor: string | undefined
+  let aidxGuard = 0
+  do {
+    if (aidxGuard++ > 50) break
+    const opts: { prefix: string; limit: number; cursor?: string } = { prefix: 'aidx_', limit: 256 }
+    if (aidxCursor) opts.cursor = aidxCursor
+    const result = await kv.list(opts)
+    const parsed = extractKeyNames(result)
+    for (const k of parsed.names) {
+      try {
+        const v = (await kv.get(k, 'json')) as { items?: Array<{ cnbPath?: string }> } | null
+        if (v?.items) {
+          for (const it of v.items) {
+            if (it.cnbPath) kvPaths.add(normPath(it.cnbPath))
           }
-        }),
-      )
-      cursor = parsed.complete ? undefined : parsed.cursor
-    } while (cursor)
-  }
+        }
+      } catch {
+        /* skip */
+      }
+    }
+    aidxCursor = parsed.complete ? undefined : parsed.cursor
+  } while (aidxCursor)
 
-  // assets 系统：asset_{service}_{key} → cnbPath
-  await scanKvPrefix('asset_', (v) => v.cnbPath as string | undefined)
-  // 图库系统：img_{id} → assetsPath / urlOriginal
-  await scanKvPrefix('img_', (v) => (v.assetsPath || v.urlOriginal) as string | undefined)
+  // 图库系统：idx_all 一次 get（聚合索引含全部图库记录）
+  try {
+    const idxAll = (await kv.get('idx_all', 'json')) as Array<Record<string, unknown>> | null
+    if (Array.isArray(idxAll)) {
+      for (const it of idxAll) {
+        const p = (it.assetsPath || it.urlOriginal) as string | undefined
+        if (p) kvPaths.add(normPath(p))
+      }
+    }
+  } catch {
+    /* idx_all 不存在或读取失败，跳过 */
+  }
 
   // 3. 比对：CNB 有但两个 KV namespace 都无 = 孤儿
   const orphans = [...cnbPaths].filter((p) => !kvPaths.has(p))

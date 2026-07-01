@@ -496,35 +496,47 @@ async function reconcileCnb(
     }
   }
 
-  // 2. 拉取 KV 侧全量 cnbPath（翻页 asset_ 前缀）
-  //    统一去前导 / 后存入集合（CNB list-assets 返回的 path 无前导 /，
-  //    而 KV cnbPath 有前导 /，比对前必须统一格式）
+  // 2. 拉取 KV 侧全量路径（两个 namespace 都要扫，否则图库图片被误判为孤儿）
+  //    asset_* （assets 系统）：取 cnbPath
+  //    img_*   （图库系统）：取 assetsPath / urlOriginal
+  //    统一去前导 / 后存入集合（CNB list-assets 返回的 path 无前导 /）
   const normPath = (p: string) => p.replace(/^\//, '')
   const kv = getKV()
   const kvPaths = new Set<string>()
-  let kvCursor: string | undefined
-  let kvGuard = 0
-  do {
-    if (kvGuard++ > 100) break
-    const opts: { prefix: string; limit: number; cursor?: string } = { prefix: 'asset_', limit: 256 }
-    if (kvCursor) opts.cursor = kvCursor
-    const result = await kv.list(opts)
-    const parsed = extractKeyNames(result)
-    // 批量 get 提取 cnbPath
-    await Promise.all(
-      parsed.names.map(async (k) => {
-        try {
-          const v = (await kv.get(k, 'json')) as AssetRecord | null
-          if (v?.cnbPath) kvPaths.add(normPath(v.cnbPath))
-        } catch {
-          /* skip */
-        }
-      }),
-    )
-    kvCursor = parsed.complete ? undefined : parsed.cursor
-  } while (kvCursor)
 
-  // 3. 比对：CNB 有但 KV 无 = 孤儿
+  // 辅助：翻页扫描某前缀，对每条记录提取 path 字段加入集合
+  async function scanKvPrefix(prefix: string, extractPath: (v: Record<string, unknown>) => string | undefined) {
+    let cursor: string | undefined
+    let guard = 0
+    do {
+      if (guard++ > 200) break
+      const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 256 }
+      if (cursor) opts.cursor = cursor
+      const result = await kv.list(opts)
+      const parsed = extractKeyNames(result)
+      await Promise.all(
+        parsed.names.map(async (k) => {
+          try {
+            const v = (await kv.get(k, 'json')) as Record<string, unknown> | null
+            if (v) {
+              const p = extractPath(v)
+              if (p) kvPaths.add(normPath(p))
+            }
+          } catch {
+            /* skip */
+          }
+        }),
+      )
+      cursor = parsed.complete ? undefined : parsed.cursor
+    } while (cursor)
+  }
+
+  // assets 系统：asset_{service}_{key} → cnbPath
+  await scanKvPrefix('asset_', (v) => v.cnbPath as string | undefined)
+  // 图库系统：img_{id} → assetsPath / urlOriginal
+  await scanKvPrefix('img_', (v) => (v.assetsPath || v.urlOriginal) as string | undefined)
+
+  // 3. 比对：CNB 有但两个 KV namespace 都无 = 孤儿
   const orphans = [...cnbPaths].filter((p) => !kvPaths.has(p))
 
   // 4. mode='delete' 时删孤儿

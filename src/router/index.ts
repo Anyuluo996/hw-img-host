@@ -1,9 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { getToken } from '@/composables/useAuth'
 
-// 登录页改用复杂字符串路径，避免主页暴露登录入口被爆破。
-// 登出 / token 失效后回到主页（随机图），不向未授权访客暴露登录表单。
-export const LOGIN_PATH = '/GfkcokTNJ5d3JzIerGZ7'
+// 登录路径不再硬编码，改为 KV 动态管理：
+// 首次访问受保护页时，守卫调 GET /api/auth/login-path 获取（无则随机生成写入 KV），
+// 然后跳转到该路径。改路径 = PUT /api/auth/login-path 重置。
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -46,29 +46,49 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
-      // 秘密登录路径，不主动暴露。
-      path: LOGIN_PATH,
+      // 动态登录路由：任何未知单段路径都匹配到 LoginView。
+      // 守卫里验证是否为真实 login_path（非已登录用户访问时才校验）。
+      path: '/:loginPath',
       name: 'login',
       component: () => import('../views/LoginView.vue'),
-    },
-    {
-      // 未匹配的任何路径都回主页（随机图），避免暴露 SPA 结构。
-      path: '/:pathMatch(.*)*',
-      redirect: '/',
     },
   ],
 })
 
-router.beforeEach((to, _from, next) => {
-  const token = getToken()
-  if (to.meta.requiresAuth && !token) {
-    // 未授权访问受保护页：回主页（随机图），不暴露登录入口。
-    next({ name: 'root' })
-  } else if (to.name === 'login' && token) {
-    next({ name: 'home' })
-  } else {
-    next()
+// 获取登录路径（从 KV，无则自动生成）。前端守卫和 401 重定向共用。
+export async function fetchLoginPath(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/auth/login-path')
+    const json = await res.json()
+    if (json.code === 0 && json.data?.loginPath) return json.data.loginPath
+    return null
+  } catch {
+    return null
   }
+}
+
+router.beforeEach(async (to, _from, next) => {
+  const token = getToken()
+
+  // 受保护页：无 token → 获取 login-path → 跳转登录
+  if (to.meta.requiresAuth && !token) {
+    const loginPath = await fetchLoginPath()
+    if (loginPath) {
+      next({ path: `/${loginPath}` })
+    } else {
+      // 获取失败（KV 异常），回主页
+      next({ name: 'root' })
+    }
+    return
+  }
+
+  // 已登录用户访问登录页 → 跳首页
+  if (to.name === 'login' && token) {
+    next({ name: 'home' })
+    return
+  }
+
+  next()
 })
 
 export default router

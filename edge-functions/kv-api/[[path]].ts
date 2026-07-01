@@ -310,6 +310,26 @@ export async function onRequest(context: {
     return new Response(null, { headers })
   }
 
+  // GET /kv-api/login-path — 公开端点（无需 JWT）：返回当前登录路径，无则随机生成。
+  // 前端路由守卫用它跳转登录页。路径本身是秘密（不知道路径看不到登录表单）。
+  const pathSegments0 = context.params.path
+  const firstSeg0 = Array.isArray(pathSegments0) ? pathSegments0[0] : pathSegments0
+  if (firstSeg0 === 'login-path' && context.request.method === 'GET') {
+    try {
+      const kv = typeof img_kv !== 'undefined' ? img_kv : undefined
+      if (!kv) return jsonRes({ code: 1, msg: 'KV 未配置' }, 500, origin)
+      let loginPath = (await kv.get('login_path', 'text')) as string | null
+      if (!loginPath) {
+        // 首次：随机生成 16 位路径（crypto.randomUUID 去横线取前 16 位）
+        loginPath = (crypto.randomUUID().replace(/-/g, '')).slice(0, 16)
+        await kv.put('login_path', loginPath)
+      }
+      return jsonRes({ code: 0, msg: 'ok', data: { loginPath } }, 200, origin)
+    } catch {
+      return jsonRes({ code: 1, msg: '获取登录路径失败' }, 500, origin)
+    }
+  }
+
   const authHeader = context.request.headers.get('Authorization')
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return jsonRes({ code: 1, msg: '未授权' }, 401, origin)
@@ -381,6 +401,18 @@ export async function onRequest(context: {
 
     if (method === 'PUT') {
       const id = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      // 子路由 PUT /kv-api/login-path — 管理员重置登录路径（生成新随机路径，旧的失效）
+      if (id === 'login-path') {
+        try {
+          const kv = typeof img_kv !== 'undefined' ? img_kv : undefined
+          if (!kv) return jsonRes({ code: 1, msg: 'KV 未配置' }, 500, origin)
+          const newLoginPath = (crypto.randomUUID().replace(/-/g, '')).slice(0, 16)
+          await kv.put('login_path', newLoginPath)
+          return jsonRes({ code: 0, msg: '登录路径已重置', data: { loginPath: newLoginPath } }, 200, origin)
+        } catch {
+          return jsonRes({ code: 1, msg: '重置失败' }, 500, origin)
+        }
+      }
       if (!id) {
         return jsonRes({ code: 1, msg: '缺少 id' }, 400, origin)
       }

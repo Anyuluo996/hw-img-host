@@ -1,6 +1,5 @@
 import { ref, computed } from 'vue'
 import axios from 'axios'
-import { LOGIN_PATH } from '@/router'
 
 const TOKEN_KEY = 'hw_img_host_token'
 
@@ -14,13 +13,24 @@ axios.interceptors.request.use((config) => {
   return config
 })
 
+// 401 时清除 token，异步获取动态登录路径后跳转（不再硬编码）
 axios.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     if (error.response?.status === 401) {
       token.value = null
       localStorage.removeItem(TOKEN_KEY)
-      window.location.href = LOGIN_PATH
+      try {
+        const res = await fetch('/api/auth/login-path')
+        const json = await res.json()
+        if (json.code === 0 && json.data?.loginPath) {
+          window.location.href = `/${json.data.loginPath}`
+        } else {
+          window.location.href = '/'
+        }
+      } catch {
+        window.location.href = '/'
+      }
     }
     return Promise.reject(error)
   },

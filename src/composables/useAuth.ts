@@ -13,24 +13,14 @@ axios.interceptors.request.use((config) => {
   return config
 })
 
-// 401 时清除 token，异步获取动态登录路径后跳转（不再硬编码）
+// 401 时清除 token，跳转主页（登录路径是秘密，不自动跳转登录页）
 axios.interceptors.response.use(
   (response) => response,
-  async (error) => {
+  (error) => {
     if (error.response?.status === 401) {
       token.value = null
       localStorage.removeItem(TOKEN_KEY)
-      try {
-        const res = await fetch('/api/auth/login-path')
-        const json = await res.json()
-        if (json.code === 0 && json.data?.loginPath) {
-          window.location.href = `/${json.data.loginPath}`
-        } else {
-          window.location.href = '/'
-        }
-      } catch {
-        window.location.href = '/'
-      }
+      window.location.href = '/'
     }
     return Promise.reject(error)
   },

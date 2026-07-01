@@ -45,14 +45,20 @@ router.post('/login', (req, res) => {
   res.json(reply(0, '登录成功', { token }))
 })
 
-// GET /api/auth/login-path — 公开端点：返回当前登录路径（前端路由守卫跳转用）
-// 无需鉴权（主页公开，需获取 login-path 才能跳转登录）。代理到边缘 kv-api。
-router.get('/login-path', async (_req, res) => {
+// GET /api/auth/login-path — 返回当前登录路径。
+// KV 无路径时自动生成（首次初始化，无需 token）；
+// KV 有路径时需 JWT（防止未登录用户探测）。前端透传 Authorization 头。
+router.get('/login-path', async (req, res) => {
   try {
     const baseUrl = (process.env.BASE_IMG_URL || '').replace(/\/$/, '')
-    const r = await fetch(`${baseUrl}/kv-api/login-path`)
+    const headers: Record<string, string> = {}
+    // 透传调用方的 Authorization（边缘函数据此决定是否返回路径）
+    const authHdr = req.headers.authorization
+    if (authHdr) headers.Authorization = authHdr
+    const r = await fetch(`${baseUrl}/kv-api/login-path`, { headers })
     const json = (await r.json()) as { code: number; msg?: string; data?: { loginPath: string } }
-    return res.json(json)
+    // 边缘返回 403 时原样透传（未登录用户不给路径）
+    return res.status(r.status).json(json)
   } catch {
     return res.status(500).json(reply(1, '获取登录路径失败'))
   }

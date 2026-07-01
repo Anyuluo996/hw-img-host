@@ -310,8 +310,10 @@ export async function onRequest(context: {
     return new Response(null, { headers })
   }
 
-  // GET /kv-api/login-path — 公开端点（无需 JWT）：返回当前登录路径，无则随机生成。
-  // 前端路由守卫用它跳转登录页。路径本身是秘密（不知道路径看不到登录表单）。
+  // GET /kv-api/login-path — 登录路径管理。
+  // 逻辑：KV 无 login_path → 随机生成 + 返回（首次初始化，无需 token）；
+  //       KV 有 login_path → 必须携带有效 JWT 才返回（路径是秘密，未登录不给）。
+  // 这样攻击者无法通过调 API 发现登录路径，只有知道路径的人才能直接访问登录页。
   const pathSegments0 = context.params.path
   const firstSeg0 = Array.isArray(pathSegments0) ? pathSegments0[0] : pathSegments0
   if (firstSeg0 === 'login-path' && context.request.method === 'GET') {
@@ -320,10 +322,20 @@ export async function onRequest(context: {
       if (!kv) return jsonRes({ code: 1, msg: 'KV 未配置' }, 500, origin)
       let loginPath = (await kv.get('login_path', 'text')) as string | null
       if (!loginPath) {
-        // 首次：随机生成 16 位路径（crypto.randomUUID 去横线取前 16 位）
+        // 首次初始化：随机生成 16 位路径（无需 token，一次性）
         loginPath = (crypto.randomUUID().replace(/-/g, '')).slice(0, 16)
         await kv.put('login_path', loginPath)
+        return jsonRes({ code: 0, msg: 'ok', data: { loginPath } }, 200, origin)
       }
+      // KV 已有路径：必须携带有效 JWT 才返回（防止未登录用户探测路径）
+      const authHdr = context.request.headers.get('Authorization')
+      if (!authHdr || !authHdr.startsWith('Bearer ')) {
+        return jsonRes({ code: 1, msg: 'Forbidden' }, 403, origin)
+      }
+      const jwtSecret0 = context.env.JWT_SECRET || context.env.UPLOAD_PASSWORD
+      if (!jwtSecret0) return jsonRes({ code: 1, msg: '服务器未配置' }, 500, origin)
+      const valid0 = await verifyToken(authHdr.slice(7), jwtSecret0)
+      if (!valid0) return jsonRes({ code: 1, msg: 'Forbidden' }, 403, origin)
       return jsonRes({ code: 0, msg: 'ok', data: { loginPath } }, 200, origin)
     } catch {
       return jsonRes({ code: 1, msg: '获取登录路径失败' }, 500, origin)

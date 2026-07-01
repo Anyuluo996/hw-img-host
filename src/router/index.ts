@@ -55,30 +55,13 @@ const router = createRouter({
   ],
 })
 
-// 获取登录路径（从 KV，无则自动生成）。前端守卫和 401 重定向共用。
-export async function fetchLoginPath(): Promise<string | null> {
-  try {
-    const res = await fetch('/api/auth/login-path')
-    const json = await res.json()
-    if (json.code === 0 && json.data?.loginPath) return json.data.loginPath
-    return null
-  } catch {
-    return null
-  }
-}
-
-router.beforeEach(async (to, _from, next) => {
+router.beforeEach((to, _from, next) => {
   const token = getToken()
 
-  // 受保护页：无 token → 获取 login-path → 跳转登录
+  // 受保护页：无 token → 回主页（不跳登录，登录路径是秘密）
+  // 用户需要直接输入登录路径 URL 才能访问登录页
   if (to.meta.requiresAuth && !token) {
-    const loginPath = await fetchLoginPath()
-    if (loginPath) {
-      next({ path: `/${loginPath}` })
-    } else {
-      // 获取失败（KV 异常），回主页
-      next({ name: 'root' })
-    }
+    next({ name: 'root' })
     return
   }
 

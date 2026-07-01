@@ -497,6 +497,9 @@ async function reconcileCnb(
   }
 
   // 2. 拉取 KV 侧全量 cnbPath（翻页 asset_ 前缀）
+  //    统一去前导 / 后存入集合（CNB list-assets 返回的 path 无前导 /，
+  //    而 KV cnbPath 有前导 /，比对前必须统一格式）
+  const normPath = (p: string) => p.replace(/^\//, '')
   const kv = getKV()
   const kvPaths = new Set<string>()
   let kvCursor: string | undefined
@@ -512,7 +515,7 @@ async function reconcileCnb(
       parsed.names.map(async (k) => {
         try {
           const v = (await kv.get(k, 'json')) as AssetRecord | null
-          if (v?.cnbPath) kvPaths.add(v.cnbPath)
+          if (v?.cnbPath) kvPaths.add(normPath(v.cnbPath))
         } catch {
           /* skip */
         }

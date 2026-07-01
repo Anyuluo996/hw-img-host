@@ -48,17 +48,23 @@ export async function onRequest(context: EdgeContext) {
     const fixedByExt = mimeForPath(fileName, '')
     // CNB 返回 text/plain 但扩展名能识别出更精确类型时，用扩展名的 MIME 覆盖
     const contentType = fixedByExt && /^text\/plain/i.test(upstreamCt) ? fixedByExt : upstreamCt
-    const isInline = shouldInline(contentType)
+
+    // 安全：HTML/JS/SVG 等可执行内容强制 attachment（防存储型 XSS）。
+    // 攻击场景：上传 .html → 发 /file-api 链接给受害者 → 站点 origin 内执行 JS。
+    const FORCED_DOWNLOAD_TYPES = /^(text\/html|application\/javascript|image\/svg\+xml)/i
+    const isInline = shouldInline(contentType) && !FORCED_DOWNLOAD_TYPES.test(contentType)
     const disposition = isInline
       ? 'inline'
       : `attachment; filename="${downloadName}"; filename*=UTF-8''${downloadName}`
 
     // 组装响应头：透传 Range 相关头（Accept-Ranges/Content-Range/Content-Length），
     // 让浏览器正确处理分段内容。
+    // 安全：nosniff 防止浏览器嗅探覆盖 Content-Type（如把 text/plain 当 html 执行）。
     const respHeaders: Record<string, string> = {
       'Content-Type': contentType,
       'Content-Disposition': disposition,
       'Cache-Control': 'public, max-age=30',
+      'X-Content-Type-Options': 'nosniff',
       ...CORS_HEADERS,
     }
     const acceptRanges = response.headers.get('Accept-Ranges')
@@ -73,8 +79,8 @@ export async function onRequest(context: EdgeContext) {
       statusText: response.statusText,
       headers: respHeaders,
     })
-  } catch (e: unknown) {
-    return new Response(JSON.stringify({ error: (e as Error)?.message || String(e) }), {
+  } catch {
+    return new Response(JSON.stringify({ error: '代理失败' }), {
       status: 502,
       headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
     })

@@ -14,9 +14,11 @@ interface EdgeContext {
 // CORS：从 BASE_IMG_URL 环境变量动态获取允许的 Origin，不硬编码域名。
 export async function onRequest(context: EdgeContext) {
   const req = context.request
-  // 允许的 Origin：从 BASE_IMG_URL 提取，未配置则用 *（开发环境友好）
+  // 允许的 Origin：从 BASE_IMG_URL 提取。
+  // 未配置时不降级为 *（避免生产环境误配导致任意来源可上传），
+  // 仅允许 localhost 开发环境。
   const baseUrl = (context.env.BASE_IMG_URL || '').replace(/\/$/, '')
-  const allowedOrigin = baseUrl || '*'
+  const allowedOrigin = baseUrl || 'http://localhost:8088'
 
   // CORS 预检
   if (req.method === 'OPTIONS') {

@@ -210,7 +210,7 @@ export async function onRequest(context: {
         'Access-Control-Allow-Origin': '*',
       },
     })
-  } catch (e: unknown) {
-    return jsonRes({ code: 1, msg: (e as Error).message || '随机图获取失败' }, 500)
+  } catch {
+    return jsonRes({ code: 1, msg: '随机图获取失败' }, 500)
   }
 }

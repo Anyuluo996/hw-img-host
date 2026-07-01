@@ -181,6 +181,14 @@ export async function onRequest(context: EdgeContext): Promise<Response> {
 
   if (req.method !== 'POST') return emptyRes(405)
 
+  // 安全：在解析 multipart 前检查 Content-Length，防超大 body 耗尽内存（DoS）。
+  // formData() 会把整个 body 缓冲到内存，必须提前拦截。
+  const contentLength = parseInt(req.headers.get('Content-Length') || '0', 10)
+  const MAX_UPLOAD_SIZE = 500 * 1024 * 1024 // 500MB 上限（边缘函数大文件通道）
+  if (contentLength > MAX_UPLOAD_SIZE) {
+    return jsonRes({ code: 1, msg: '文件过大' }, 413)
+  }
+
   try {
     // 解析 multipart（Request.formData 是标准 API，边缘运行时支持）
     const form = await req.formData()

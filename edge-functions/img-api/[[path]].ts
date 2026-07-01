@@ -53,8 +53,8 @@ export async function onRequest(context: EdgeContext) {
       statusText: response.statusText,
       headers: respHeaders,
     })
-  } catch (e: unknown) {
-    return new Response(JSON.stringify({ error: (e as Error)?.message || String(e) }), {
+  } catch {
+    return new Response(JSON.stringify({ error: '代理失败' }), {
       status: 502,
       headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
     })

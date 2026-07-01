@@ -196,7 +196,7 @@ const deleteUrl = `https://api.cnb.cool/${slug}/-/${isImgs ? 'imgs' : 'files'}/$
 
 ```
 /<slug>/-/imgs/<ID>/<uuid>.<ext>
-└── 示例: /anyuluo/imagescdn/-/imgs/U3V9LHH158HCMyxbKejujA/f869356b-...-cat.jpg
+└── 示例: /your-username/your-repo/-/imgs/U3V9LHH158HCMyxbKejujA/f869356b-...-cat.jpg
 ```
 
 - `<ID>` = 仓库内短 ID(base64)
@@ -207,7 +207,7 @@ const deleteUrl = `https://api.cnb.cool/${slug}/-/${isImgs ? 'imgs' : 'files'}/$
 
 ```
 /<slug>/-/files/<ID>/<uuid>/<原始文件名>
-└── 示例: /anyuluo/imagescdn/-/files/U3V9.../a1b2.../report.pdf
+└── 示例: /your-username/your-repo/-/files/U3V9.../a1b2.../report.pdf
 ```
 
 - **保留原始文件名**(下载时用)

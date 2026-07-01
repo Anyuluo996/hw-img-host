@@ -1,24 +1,28 @@
 interface EdgeContext {
   request: Request
+  env: Record<string, string | undefined>
   params: { path?: string | string[] }
 }
-
-const ALLOWED_ORIGIN = 'https://cdn.anyul.cn'
 
 // 大文件上传代理：浏览器 → 边缘函数 → CNB 直传
 // 绕开 node-function 的请求体限制（实测约 5-6MB）。
 // 边缘函数流式转发 request.body，不缓存到内存。
 //
-// 用法：浏览器 PUT https://cdn.anyul.cn/upload-proxy/assets/t/<token>
+// 用法：浏览器 PUT https://your-domain.com/upload-proxy/assets/t/<token>
 //      边缘函数把 body 流式转发到 https://asset.cnb.cool/assets/t/<token>
+//
+// CORS：从 BASE_IMG_URL 环境变量动态获取允许的 Origin，不硬编码域名。
 export async function onRequest(context: EdgeContext) {
   const req = context.request
+  // 允许的 Origin：从 BASE_IMG_URL 提取，未配置则用 *（开发环境友好）
+  const baseUrl = (context.env.BASE_IMG_URL || '').replace(/\/$/, '')
+  const allowedOrigin = baseUrl || '*'
 
   // CORS 预检
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       headers: {
-        'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+        'Access-Control-Allow-Origin': allowedOrigin,
         'Access-Control-Allow-Methods': 'PUT, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
       },
@@ -28,7 +32,7 @@ export async function onRequest(context: EdgeContext) {
   if (req.method !== 'PUT') {
     return new Response(JSON.stringify({ code: 1, msg: '只支持 PUT' }), {
       status: 405,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN },
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': allowedOrigin },
     })
   }
 
@@ -41,7 +45,7 @@ export async function onRequest(context: EdgeContext) {
   if (!subPath.startsWith('assets/t/')) {
     return new Response(JSON.stringify({ code: 1, msg: '非法上传路径' }), {
       status: 400,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN },
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': allowedOrigin },
     })
   }
 
@@ -58,14 +62,14 @@ export async function onRequest(context: EdgeContext) {
     return new Response(resp.body, {
       status: resp.status,
       headers: {
-        'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+        'Access-Control-Allow-Origin': allowedOrigin,
         'Content-Type': resp.headers.get('Content-Type') || 'application/json',
       },
     })
-  } catch (e: unknown) {
+  } catch {
     return new Response(JSON.stringify({ code: 1, msg: '上传转发失败' }), {
       status: 502,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN },
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': allowedOrigin },
     })
   }
 }

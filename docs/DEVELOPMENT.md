@@ -67,7 +67,7 @@ PAGES_SOURCE=skills edgeone pages env pull # 拉取环境变量到 .env
 
 | 变量 | 说明 | 示例 |
 | --- | --- | --- |
-| `BASE_IMG_URL` | 站点域名 | `https://cdn.anyul.cn/` |
+| `BASE_IMG_URL` | 站点域名 | `https://your-domain.com/` |
 | `SLUG_IMG` | CNB 图床仓库 | `user/repo` |
 | `TOKEN_IMG` | CNB token(imgs 读写) | |
 | `TOKEN_FILE` | CNB token(files,需 `repo-notes:rw`) | |
@@ -283,7 +283,7 @@ JWT 签名/验签用 Web Crypto 的 `crypto.subtle.importKey` + `sign`/`verify`(
 
 ```ts
 // ❌ 边缘函数里调自己的域名,会失败
-await fetch('https://cdn.anyul.cn/assets-api/index', ...)
+await fetch('https://your-domain.com/assets-api/index', ...)
 
 // ✅ 边缘函数之间共享 img_kv 绑定,直接操作 KV
 await img_kv.put('asset_service_key', JSON.stringify(record))

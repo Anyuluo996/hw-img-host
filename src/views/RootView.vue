@@ -4,10 +4,12 @@
 import { ref } from 'vue'
 
 const copied = ref('')
+// 动态用当前域名生成示例（不硬编码，避免信息泄露）
+const origin = window.location.origin
 const examples = [
-  { label: '随机一张', url: 'https://cdn.anyul.cn/img' },
-  { label: '指定标签', url: 'https://cdn.anyul.cn/img?tag=鸣潮' },
-  { label: '多个标签（任一命中）', url: 'https://cdn.anyul.cn/img?tag=鸣潮,原神' },
+  { label: '随机一张', url: `${origin}/img` },
+  { label: '指定标签', url: `${origin}/img?tag=鸣潮` },
+  { label: '多个标签（任一命中）', url: `${origin}/img?tag=鸣潮,原神` },
 ]
 
 async function copy(url: string) {
@@ -52,8 +54,8 @@ async function copy(url: string) {
 
       <div class="mt-8 space-y-2 text-sm text-muted-foreground">
         <p><span class="text-foreground/70">用法</span>：把链接当作普通图片 URL 即可。</p>
-        <pre class="overflow-x-auto rounded-lg bg-muted/40 p-3 text-xs"><code>&lt;img src="https://cdn.anyul.cn/img" /&gt;
-background: url('https://cdn.anyul.cn/img?tag=鸣潮');</code></pre>
+        <pre class="overflow-x-auto rounded-lg bg-muted/40 p-3 text-xs"><code>&lt;img src="{{ origin }}/img" /&gt;
+background: url('{{ origin }}/img?tag=鸣潮');</code></pre>
         <p class="pt-2 text-xs text-muted-foreground/70">每次请求随机返回一张，刷新即换图。</p>
       </div>
     </div>

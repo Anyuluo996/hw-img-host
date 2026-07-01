@@ -39,16 +39,23 @@ export function extractKeys(result: unknown): ParsedKeys {
 }
 
 // CORS 白名单匹配（M3 收紧）。origin 命中白名单则原样返回，否则 null。
+// 默认白名单从 BASE_IMG_URL 动态生成，不硬编码域名。
 export function pickOrigin(
   origin: string | null,
-  env: { KV_ALLOWED_ORIGINS?: string },
-  defaults: string[] = ['https://cdn.anyul.cn', 'http://localhost:3210', 'http://localhost:5173'],
+  env: { KV_ALLOWED_ORIGINS?: string; BASE_IMG_URL?: string },
+  defaults?: string[],
 ): string | null {
   if (!origin) return null
   const configured = env.KV_ALLOWED_ORIGINS
+  // 默认白名单：BASE_IMG_URL + localhost 开发环境
+  const fallback = [
+    ...(env.BASE_IMG_URL ? [env.BASE_IMG_URL.replace(/\/$/, '')] : []),
+    'http://localhost:3210',
+    'http://localhost:5173',
+  ]
   const list = configured
     ? configured.split(',').map((s) => s.trim()).filter(Boolean)
-    : defaults
+    : (defaults || fallback)
   return list.includes(origin) ? origin : null
 }
 

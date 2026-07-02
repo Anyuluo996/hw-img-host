@@ -9,6 +9,8 @@ import {
   checkRateLimit,
   recordFailedAttempt,
   clearRateLimit,
+  extractLoginCandidate,
+  verifyLoginPath,
 } from '../_auth'
 import {
   beginRegistration,
@@ -24,9 +26,17 @@ import {
 
 const router = Router()
 
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   if (!process.env.UPLOAD_PASSWORD) {
     return res.status(400).json(reply(1, '服务器未配置上传密码'))
+  }
+
+  // 路径校验（在限速之前）：从 Referer 解析候选路径，回环 edge 比对 KV 中的真实路径。
+  // 不消耗限速配额——路径错的人连试密码的资格都没有。失败直接 403。
+  const candidate = extractLoginCandidate(req)
+  const pathOk = await verifyLoginPath(candidate)
+  if (!pathOk) {
+    return res.status(403).json(reply(1, 'Forbidden'))
   }
 
   // 后端限速：基于 IP 的失败计数（前端 2s 冷却只挡浏览器，curl 无阻碍）

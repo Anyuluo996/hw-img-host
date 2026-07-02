@@ -292,29 +292,44 @@ async function mutateIndex(service, fn) {
        │  最终验证
 ```
 
-### 首次初始化流程（由谁触发）
+### 首次初始化流程（管理员手动触发）
 
-> ⚠️ **当前实现的实情**：前端**不会自动**调用 `GET /login-path` 触发初始化。
+前端**不会自动**调用登录路径 API。首次初始化是**管理员部署后的一次性动作**：
 
-- 前端路由 `/`（`RootView`）是静态随机图说明页，不调登录路径 API。
-- 路由守卫 `beforeEach` 只做两件事：受保护页无 token → 跳 `/`；已登录访问登录页 → 跳 `/home`。**不触发初始化**。
-- 登录页路由是 `/:loginPath`（catch-all，匹配任意单段未知路径），**前端不校验这个值是否等于 KV 里的真实路径**——任何单段路径都能渲染登录表单。
-- `POST /api/auth/login` 只验密码，**不校验**请求来自哪个路径。
+```bash
+# 部署完成后，管理员执行一次（公开，首次无需 token）：
+curl https://your-domain.com/api/auth/login-path
+# → { "code": 0, "data": { "loginPath": "a1b2c3d4e5f6g7h8" } }
 
-也就是说，`login_path` 目前是个**可选的秘密值**，真实安全主要由层级 2（限速）+ 层级 3（密码）承担。`GET /login-path` 的"首次自动生成"只在有人**手动 curl** 该端点时才会发生：
+# 记下返回的 16 位路径，之后用该路径访问登录页：
+https://your-domain.com/a1b2c3d4e5f6g7h8
+```
+
+之后该端点进入 403 模式（需 JWT 才能查看/重置），攻击者无法再通过 API 探测路径。
+
+### 路径校验（`POST /login` 前置门禁）
+
+登录路径不是死字段——`POST /api/auth/login` 会在密码校验**之前**校验请求来源路径：
 
 ```
-首次（KV 无 login_path）：
-  任何人 GET /api/auth/login-path（无需 token）
-   → 边缘函数随机生成 16 位（crypto.randomUUID 去横线截前 16）
-   → 写入 KV `login_path`
-   → 返回 { loginPath: "a1b2c3..." }
-   （一次性初始化；写入后该端点进入 403 模式）
-
-后续（KV 已有 login_path）：
-  GET /api/auth/login-path（无 token）→ 403（防止未登录探测）
-  GET /api/auth/login-path（有 JWT）  → 返回当前路径
+浏览器导航到 /<loginPath> → 渲染登录表单（前端 catch-all，不校验值）
+  ↓ 用户提交密码
+POST /api/auth/login（自动带 Referer: https://your-domain.com/<loginPath>）
+  ↓ node 从 Referer 解析首段作为 candidate
+  ↓ 回环 POST /kv-api/login-path/verify { candidate }
+  ↓ edge 读 KV login_path 比对，返回 { ok: boolean }
+  ├─ ok:false → 403 Forbidden（不消耗限速配额，路径错的人连试密码的资格都没有）
+  └─ ok:true  → 进入原有 IP 限速 + 密码校验流程
 ```
+
+**校验源用 Referer 头**：浏览器 same-origin 导航必带，无需改前端调用方。
+
+**安全权衡**：
+
+1. **Referer 可被禁用**：少数浏览器/隐私设置不发 Referer → 这些用户登录会 403。路径校验是额外层，密码登录是兜底，可接受。
+2. **curl 伪造 Referer**：需先知道正确路径才能伪造，而路径正是要守的秘密 → 自洽。
+3. **edge 故障 fail-open**：`verifyLoginPath` 网络错误返回 true，避免 KV 抖动锁死所有登录。路径校验本就是限速+密码之外的额外层，fail-open 不破坏核心安全。
+4. **verify 端点不泄露路径**：`POST /kv-api/login-path/verify` 只返回布尔 `{ ok }`，即便被探测也无法得知正确路径。
 
 ### 路径获取规则（`GET /api/auth/login-path`）
 

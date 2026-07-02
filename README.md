@@ -78,6 +78,15 @@ GET /img-api/* (eg. https://img.example.com/img-api/path/to/img.webp)
    - 构建并部署，返回访问 URL
 
 3. **配置环境变量**（部署后在 EdgeOne 控制台设置，见[环境配置](#环境配置)）
+4. **初始化登录路径**（一次性）：部署后，执行下面命令生成秘密登录路径，记下返回值，用它访问登录页
+
+   ```sh
+   curl https://your-domain.com/api/auth/login-path
+   # → { "code": 0, "data": { "loginPath": "a1b2c3d4e5f6g7h8" } }
+   # 之后用 https://your-domain.com/a1b2c3d4e5f6g7h8 访问登录页
+   ```
+
+   > 登录路径是 16 位随机值，存在 KV 里。不知道路径就看不到登录表单，且 `POST /login` 会校验请求来源路径（Referer），路径错误直接 403。详见 [MECHANISM.md 登录路径安全模型](./docs/MECHANISM.md#登录路径安全模型)。
 
 > 💡 Agent 也能帮你做本地开发：说"启动本地开发服务器"，它会调用 `edgeone-pages-dev` skill 启动全栈 dev（前端 + 函数 + KV）。
 >

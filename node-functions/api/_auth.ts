@@ -95,4 +95,47 @@ export function clearRateLimit(ip: string): void {
   rateMap.delete(ip)
 }
 
+// ============ 登录路径校验 ============
+// 从 Referer 头解析出客户端声明的登录路径（URL pathname 首段）。
+// 浏览器 same-origin 导航必带 Referer；无 Referer 返回空串（→ 校验失败）。
+export function extractLoginCandidate(req: Request): string {
+  const ref = req.headers.referer || req.headers.referrer
+  if (!ref || typeof ref !== 'string') return ''
+  try {
+    const u = new URL(ref)
+    // pathname 形如 "/a1b2c3..."，取首段
+    return u.pathname.replace(/^\/+/, '').split('/')[0] || ''
+  } catch {
+    return ''
+  }
+}
+
+// 回环 edge POST /kv-api/login-path/verify 校验候选路径。
+// 权衡：edge/KV 故障时 fail-open（返回 true），避免基础设施抖动锁死所有登录。
+// 路径校验本就是限速+密码之外的额外层，fail-open 不破坏核心安全。
+export async function verifyLoginPath(candidate: string): Promise<boolean> {
+  const baseUrl = (process.env.BASE_IMG_URL || '').replace(/\/$/, '')
+  const secret = process.env.JWT_SECRET || process.env.UPLOAD_PASSWORD
+  if (!baseUrl || !secret) return true // 配置缺失不阻断（避免锁死）
+  const token = jwt.sign({}, secret, { expiresIn: '5m' })
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 10000)
+  try {
+    const resp = await fetch(`${baseUrl}/kv-api/login-path/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ candidate }),
+      signal: controller.signal,
+    })
+    if (!resp.ok) return true // edge 返回非 200 → fail-open
+    const json = (await resp.json()) as { code: number; data?: { ok?: boolean } }
+    if (json.code !== 0) return true
+    return json.data?.ok === true
+  } catch {
+    return true // 网络错误 → fail-open
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export { RATE_WINDOW_MS, RATE_MAX_FAILS }

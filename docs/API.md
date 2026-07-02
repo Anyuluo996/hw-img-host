@@ -716,7 +716,11 @@ curl -X POST "https://your-domain.com/api/auth/login" \
 Token 7 天有效。后续管理请求带 `Authorization: Bearer <token>`。
 
 > **后端限速**：基于 IP 的失败计数，15 分钟窗口内最多 5 次失败尝试。超限返回 `429`（`Retry-After: 900`）。前端另有 2s 冷却。成功登录清除计数。
-> **登录路径**：登录页不在固定 URL，而是动态随机路径（16 位）。首次部署自动生成，管理员可通过 `PUT /api/auth/login-path` 重置。详见[登录路径安全模型](./MECHANISM.md#登录路径安全模型)。
+> **登录路径校验（前置门禁）**：本端点在密码校验之前先校验请求来源路径——从 `Referer` 头解析 pathname 首段，回环 `POST /kv-api/login-path/verify` 比对 KV 中的真实 `login_path`。路径不匹配直接返回 `403 Forbidden`，**不消耗限速配额**（路径错的人连试密码的资格都没有）。详见[登录路径安全模型](./MECHANISM.md#登录路径安全模型)。
+> - 浏览器 same-origin 导航必带 Referer，前端调用方无需改动。
+> - curl 伪造 Referer 需先知道正确路径，而路径正是秘密 → 自洽。
+> - 极少数禁用 Referer 的浏览器会 403；路径校验是额外层，密码登录是兜底。
+> - edge 故障时校验 fail-open（放行），避免基础设施抖动锁死所有登录。
 
 #### 登录路径管理
 
@@ -726,7 +730,7 @@ Token 7 天有效。后续管理请求带 `Authorization: Bearer <token>`。
 - KV 无路径（首次）→ 自动随机生成 + 返回（无需 token，一次性初始化）
 - KV 已有路径 → **需要 JWT**，否则返回 `403`（防止未登录用户探测路径）
 
-> **初始化触发**：前端不会自动调用此端点。首次初始化只在有人**手动 GET**（如 curl 或管理员部署后手动请求）时发生。前端登录页是 `/:loginPath` catch-all 路由，任意单段路径都能渲染表单；`POST /login` 只验密码，不校验路径值。详见 [MECHANISM.md 首次初始化流程](./MECHANISM.md#首次初始化流程由谁触发)。
+> **首次部署初始化**（管理员一次性动作）：前端不自动触发。部署完成后执行 `curl https://your-domain.com/api/auth/login-path`（首次公开无需 token）生成路径，记下返回值，之后用该路径访问登录页。详见 [MECHANISM.md 首次初始化流程](./MECHANISM.md#首次初始化流程管理员手动触发)。
 
 ```bash
 # 已登录（查看当前路径）
@@ -746,6 +750,8 @@ curl -X PUT "https://your-domain.com/api/auth/login-path" -H "Authorization: Bea
 ```
 
 > 未登录用户访问 `/home` 等受保护页会被重定向到 `/`（主页），不会自动跳转登录页。用户需要**直接输入登录路径 URL** 才能访问登录表单。
+
+> **路径校验内部端点**（`POST /login` 回环用，不对外）：`POST /kv-api/login-path/verify` body `{ candidate }`，返回 `{ ok: boolean }`，首次部署 KV 无路径时顺便初始化（返回 `ok:false, initialized:true`）。只返回布尔，绝不泄露真实路径。
 
 ### 3.2 上传签名（客户端直传）
 

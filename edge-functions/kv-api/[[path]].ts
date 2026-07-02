@@ -342,6 +342,32 @@ export async function onRequest(context: {
     }
   }
 
+  // POST /kv-api/login-path/verify — 校验候选路径是否正确（登录时用，无需 token）。
+  // 不返回真实路径，只返回布尔。首次部署 KV 无路径时顺便初始化（但返回 ok:false）。
+  // pathSegments: ['login-path','verify']
+  if (firstSeg0 === 'login-path' && context.request.method === 'POST') {
+    const secondSeg0 = Array.isArray(pathSegments0) ? pathSegments0[1] : undefined
+    if (secondSeg0 === 'verify') {
+      try {
+        const kv = typeof img_kv !== 'undefined' ? img_kv : undefined
+        if (!kv) return jsonRes({ code: 1, msg: 'KV 未配置' }, 500, origin)
+        const body = (await context.request.json()) as { candidate?: string }
+        let loginPath = (await kv.get('login_path', 'text')) as string | null
+        if (!loginPath) {
+          // 首次初始化：随机生成并写入（一次性），但本次校验返回 ok:false
+          // 因为 candidate 不可能等于刚生成的随机值
+          loginPath = (crypto.randomUUID().replace(/-/g, '')).slice(0, 16)
+          await kv.put('login_path', loginPath)
+          return jsonRes({ code: 0, msg: 'ok', data: { ok: false, initialized: true } }, 200, origin)
+        }
+        const ok = typeof body.candidate === 'string' && body.candidate === loginPath
+        return jsonRes({ code: 0, msg: 'ok', data: { ok } }, 200, origin)
+      } catch {
+        return jsonRes({ code: 1, msg: '校验失败' }, 500, origin)
+      }
+    }
+  }
+
   const authHeader = context.request.headers.get('Authorization')
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return jsonRes({ code: 1, msg: '未授权' }, 401, origin)

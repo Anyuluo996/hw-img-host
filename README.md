@@ -78,7 +78,7 @@ GET /img-api/* (eg. https://img.example.com/img-api/path/to/img.webp)
    - 构建并部署，返回访问 URL
 
 3. **配置环境变量**（部署后在 EdgeOne 控制台设置，见[环境配置](#环境配置)）
-4. **初始化登录路径**（一次性）：部署后，执行下面命令生成秘密登录路径，记下返回值，用它访问登录页
+4. **初始化登录路径**（一次性，自动）：部署后第一个访问 `/home` 的用户会被自动跳转到生成的登录路径。也可手动触发并记下路径：
 
    ```sh
    curl https://your-domain.com/api/auth/login-path

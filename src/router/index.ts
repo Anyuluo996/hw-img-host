@@ -2,8 +2,22 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { getToken } from '@/composables/useAuth'
 
 // 登录路径由 KV 动态管理（GET/PUT /api/auth/login-path）。
-// 注意：前端不主动触发初始化，也不校验路径值——登录页是 catch-all（任意单段路径都渲染表单），
-// 真实安全靠后端密码 + IP 限速。login_path 仅作可选秘密值，需管理员手动 curl 才会首次生成。
+// 首次部署后，第一个访问受保护页的人会触发 GET /login-path 自动生成路径并跳转（一次性）。
+// 之后该端点变 403（已有路径需 JWT），访问受保护页无 token → 回根路径，需手动输入路径。
+// 登录时 POST /login 会校验 Referer 里的路径是否匹配 KV 真实值，路径错直接 403。
+
+// 拉取登录路径。仅在 KV 无路径（首次部署）时返回值，之后 403 返回 null。
+async function fetchLoginPath(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/auth/login-path')
+    if (!res.ok) return null
+    const json = await res.json()
+    if (json.code === 0 && json.data?.loginPath) return json.data.loginPath
+    return null
+  } catch {
+    return null
+  }
+}
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -62,13 +76,20 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const token = getToken()
 
-  // 受保护页：无 token → 回主页（不跳登录，登录路径是秘密）
-  // 用户需要直接输入登录路径 URL 才能访问登录页
+  // 受保护页：无 token → 尝试获取登录路径（仅首次部署有效）→ 跳转登录
+  // 之后 GET /login-path 变 403（已有路径需 JWT），返回 null → 回主页
   if (to.meta.requiresAuth && !token) {
-    next({ name: 'root' })
+    const loginPath = await fetchLoginPath()
+    if (loginPath) {
+      // 首次部署：KV 刚生成路径，跳转过去
+      next({ path: `/${loginPath}` })
+    } else {
+      // 路径已存在（403）或获取失败 → 回主页，用户需手动输入路径
+      next({ name: 'root' })
+    }
     return
   }
 

@@ -292,20 +292,22 @@ async function mutateIndex(service, fn) {
        │  最终验证
 ```
 
-### 首次初始化流程（管理员手动触发）
+### 首次初始化流程（部署后自动触发一次）
 
-前端**不会自动**调用登录路径 API。首次初始化是**管理员部署后的一次性动作**：
+部署后第一个访问受保护页（如 `/home`）的用户会自动触发初始化：
 
-```bash
-# 部署完成后，管理员执行一次（公开，首次无需 token）：
-curl https://your-domain.com/api/auth/login-path
-# → { "code": 0, "data": { "loginPath": "a1b2c3d4e5f6g7h8" } }
-
-# 记下返回的 16 位路径，之后用该路径访问登录页：
-https://your-domain.com/a1b2c3d4e5f6g7h8
+```
+访问 /home（无 token）
+  → 路由守卫 beforeEach 调 GET /api/auth/login-path
+  → edge：KV 无 login_path → 随机生成 16 位 + 写入 + 返回 { loginPath }
+  → 守卫拿到路径，next({ path: `/${loginPath}` }) 跳转到登录页
 ```
 
-之后该端点进入 403 模式（需 JWT 才能查看/重置），攻击者无法再通过 API 探测路径。
+这是**一次性**的——之后 KV 已有路径，`GET /login-path` 对未登录用户返回 403，守卫拿到 null，访问受保护页无 token → 回主页（需手动输入路径）。
+
+> 也可手动触发：`curl https://your-domain.com/api/auth/login-path`（首次公开，之后 403）。
+>
+> 设计权衡：这相当于"首个访问者能看到一次登录页跳转"。但首次部署后这个权限窗口只开一次，且第一个访问者通常是部署者本人。若担心，部署后立即手动 curl 初始化即可立刻关闭窗口。
 
 ### 路径校验（`POST /login` 前置门禁）
 

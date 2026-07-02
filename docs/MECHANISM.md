@@ -326,10 +326,12 @@ POST /api/auth/login（自动带 Referer: https://your-domain.com/<loginPath>）
 
 **校验源用 Referer 头**：浏览器 same-origin 导航必带，无需改前端调用方。
 
+**仅同源校验**：路径校验**只对同源请求生效**（Referer 的 origin 是图床域名或本地 dev 端口）。跨域 API 调用（如油猴脚本从第三方站点发起）Referer 是别站或空 → 跳过路径校验，靠密码+JWT+限速保护。路径校验的本意是保护图床域名下的浏览器登录表单，对 API 层攻击本就无效（curl 可伪造 Referer）。
+
 **安全权衡**：
 
-1. **Referer 可被禁用**：少数浏览器/隐私设置不发 Referer → 这些用户登录会 403。路径校验是额外层，密码登录是兜底，可接受。
-2. **curl 伪造 Referer**：需先知道正确路径才能伪造，而路径正是要守的秘密 → 自洽。
+1. **Referer 可被禁用**：少数浏览器/隐私设置不发 Referer → 同源判定失败 → 跳过校验（不会误杀，因为跨域/无 Referer 一律放行给密码+限速）。
+2. **curl 伪造 Referer**：需先知道正确路径才能伪造同源 Referer，而路径正是要守的秘密 → 自洽。
 3. **edge 故障 fail-open**：`verifyLoginPath` 网络错误返回 true，避免 KV 抖动锁死所有登录。路径校验本就是限速+密码之外的额外层，fail-open 不破坏核心安全。
 4. **verify 端点不泄露路径**：`POST /kv-api/login-path/verify` 只返回布尔 `{ ok }`，即便被探测也无法得知正确路径。
 

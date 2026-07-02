@@ -96,17 +96,24 @@ export function clearRateLimit(ip: string): void {
 }
 
 // ============ 登录路径校验 ============
-// 从 Referer 头解析出客户端声明的登录路径（URL pathname 首段）。
-// 浏览器 same-origin 导航必带 Referer；无 Referer 返回空串（→ 校验失败）。
-export function extractLoginCandidate(req: Request): string {
+// 从 Referer 头解析出客户端声明的登录路径（URL pathname 首段）+ 是否同源。
+// 浏览器 same-origin 导航必带 Referer 且与站点同源；
+// 跨域 API 调用（如油猴脚本从第三方站点发起）Referer 是别站或空 → sameOrigin=false → 跳过路径校验。
+// 路径校验只保护图床域名下的浏览器登录表单场景，跨域 API 调用靠密码+JWT+限速。
+export function extractLoginCandidate(req: Request): { candidate: string; sameOrigin: boolean } {
   const ref = req.headers.referer || req.headers.referrer
-  if (!ref || typeof ref !== 'string') return ''
+  if (!ref || typeof ref !== 'string') return { candidate: '', sameOrigin: false }
   try {
     const u = new URL(ref)
+    const siteOrigin = (process.env.BASE_IMG_URL || '').replace(/\/$/, '')
+    // 允许生产域名 + 本地 dev 端口
+    const allowed = [siteOrigin, 'http://localhost:5173', 'http://localhost:4173'].filter(Boolean)
+    const sameOrigin = allowed.some((o) => `${u.protocol}//${u.host}` === o)
     // pathname 形如 "/a1b2c3..."，取首段
-    return u.pathname.replace(/^\/+/, '').split('/')[0] || ''
+    const candidate = u.pathname.replace(/^\/+/, '').split('/')[0] || ''
+    return { candidate, sameOrigin }
   } catch {
-    return ''
+    return { candidate: '', sameOrigin: false }
   }
 }
 

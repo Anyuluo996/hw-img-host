@@ -726,6 +726,8 @@ Token 7 天有效。后续管理请求带 `Authorization: Bearer <token>`。
 - KV 无路径（首次）→ 自动随机生成 + 返回（无需 token，一次性初始化）
 - KV 已有路径 → **需要 JWT**，否则返回 `403`（防止未登录用户探测路径）
 
+> **初始化触发**：前端不会自动调用此端点。首次初始化只在有人**手动 GET**（如 curl 或管理员部署后手动请求）时发生。前端登录页是 `/:loginPath` catch-all 路由，任意单段路径都能渲染表单；`POST /login` 只验密码，不校验路径值。详见 [MECHANISM.md 首次初始化流程](./MECHANISM.md#首次初始化流程由谁触发)。
+
 ```bash
 # 已登录（查看当前路径）
 curl "https://your-domain.com/api/auth/login-path" -H "Authorization: Bearer <jwt>"

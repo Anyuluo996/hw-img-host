@@ -292,6 +292,30 @@ async function mutateIndex(service, fn) {
        │  最终验证
 ```
 
+### 首次初始化流程（由谁触发）
+
+> ⚠️ **当前实现的实情**：前端**不会自动**调用 `GET /login-path` 触发初始化。
+
+- 前端路由 `/`（`RootView`）是静态随机图说明页，不调登录路径 API。
+- 路由守卫 `beforeEach` 只做两件事：受保护页无 token → 跳 `/`；已登录访问登录页 → 跳 `/home`。**不触发初始化**。
+- 登录页路由是 `/:loginPath`（catch-all，匹配任意单段未知路径），**前端不校验这个值是否等于 KV 里的真实路径**——任何单段路径都能渲染登录表单。
+- `POST /api/auth/login` 只验密码，**不校验**请求来自哪个路径。
+
+也就是说，`login_path` 目前是个**可选的秘密值**，真实安全主要由层级 2（限速）+ 层级 3（密码）承担。`GET /login-path` 的"首次自动生成"只在有人**手动 curl** 该端点时才会发生：
+
+```
+首次（KV 无 login_path）：
+  任何人 GET /api/auth/login-path（无需 token）
+   → 边缘函数随机生成 16 位（crypto.randomUUID 去横线截前 16）
+   → 写入 KV `login_path`
+   → 返回 { loginPath: "a1b2c3..." }
+   （一次性初始化；写入后该端点进入 403 模式）
+
+后续（KV 已有 login_path）：
+  GET /api/auth/login-path（无 token）→ 403（防止未登录探测）
+  GET /api/auth/login-path（有 JWT）  → 返回当前路径
+```
+
 ### 路径获取规则（`GET /api/auth/login-path`）
 
 | KV 状态 | 鉴权要求 | 行为 |

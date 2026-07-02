@@ -1,9 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { getToken } from '@/composables/useAuth'
 
-// 登录路径不再硬编码，改为 KV 动态管理：
-// 首次访问受保护页时，守卫调 GET /api/auth/login-path 获取（无则随机生成写入 KV），
-// 然后跳转到该路径。改路径 = PUT /api/auth/login-path 重置。
+// 登录路径由 KV 动态管理（GET/PUT /api/auth/login-path）。
+// 注意：前端不主动触发初始化，也不校验路径值——登录页是 catch-all（任意单段路径都渲染表单），
+// 真实安全靠后端密码 + IP 限速。login_path 仅作可选秘密值，需管理员手动 curl 才会首次生成。
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),

@@ -34,8 +34,14 @@
   - [3.4 删除文件](#34-删除文件)
   - [3.5 图库索引](#35-图库索引)
 - [四、公开访问端点](#四公开访问端点)
-- [五、环境变量](#五环境变量)
-- [六、错误码](#六错误码)
+- [五、通行密钥端点（WebAuthn）](#五通行密钥端点webauthn)
+  - [5.1 开始注册（需登录）](#51-开始注册需登录)
+  - [5.2 完成注册（需登录）](#52-完成注册需登录)
+  - [5.3 开始登录（公开）](#53-开始登录公开)
+  - [5.4 完成登录（公开）](#54-完成登录公开)
+  - [5.5 列举 / 删除通行密钥（需登录）](#55-列举--删除通行密钥需登录)
+- [六、环境变量](#六环境变量)
+- [七、错误码](#七错误码)
 
 ---
 
@@ -879,7 +885,91 @@ curl "https://your-domain.com/img-api/ID/uuid.jpg" -o cat.jpg
 
 ---
 
-## 五、环境变量
+## 五、通行密钥端点（WebAuthn）
+
+通行密钥登录基于 [WebAuthn](https://webauthn.guide/)，用设备内置认证器（指纹 / Face ID / PIN）或 USB 安全密钥替代密码。所有端点前缀 `/api/auth/passkey`。
+
+**信任模型**：通行密钥只能证明"持有某设备"，不能自举信任——所以**注册必须先登录**（密码或已有通行密钥），**登录端点公开**。
+
+### 5.1 开始注册（需登录）
+
+```
+POST /api/auth/passkey/register/begin
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+{ "name": "MacBook" }   // 可选，设备别名
+```
+
+返回 `@simplewebauthn/browser` 的 `startRegistration` 所需的 `optionsJSON` 和一次性 `nonce`：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "options": { /* PublicKeyCredentialCreationOptions JSON */ },
+    "nonce": "a1b2c3..."
+  }
+}
+```
+
+前端：`const cred = await startRegistration({ optionsJSON: options })`，浏览器弹出系统认证。
+
+### 5.2 完成注册（需登录）
+
+```
+POST /api/auth/passkey/register/verify
+Authorization: Bearer <JWT>
+Content-Type: application/json
+
+{ "resp": <startRegistration 的返回>, "nonce": "<上一步>", "name": "MacBook" }
+```
+
+成功后凭证持久化到 KV。失败返回 `code !== 0` 与中文 `msg`。
+
+### 5.3 开始登录（公开）
+
+```
+POST /api/auth/passkey/login/begin
+```
+
+返回 `PublicKeyCredentialRequestOptions` 和 `nonce`：
+
+```json
+{ "code": 0, "data": { "options": { ... }, "nonce": "..." } }
+```
+
+`allowCredentials` 会列出全部已注册凭证，让用户选择。前端：`const cred = await startAuthentication({ optionsJSON: options })`。
+
+### 5.4 完成登录（公开）
+
+```
+POST /api/auth/passkey/login/verify
+Content-Type: application/json
+
+{ "resp": <startAuthentication 的返回>, "nonce": "<上一步>" }
+```
+
+成功返回与密码登录完全相同的 JWT：
+
+```json
+{ "code": 0, "msg": "登录成功", "data": { "token": "<JWT>" } }
+```
+
+失败受同一套 IP 限速保护（5 次 / 15 分钟，429 + `Retry-After: 900`）。
+
+### 5.5 列举 / 删除通行密钥（需登录）
+
+```
+GET    /api/auth/passkey/list                → { code:0, data:{ items: PasskeyItem[] } }
+DELETE /api/auth/passkey/{credentialId}      → { code:0, msg:"已删除" }
+```
+
+`PasskeyItem`：`{ id, publicKey, counter, transports[], name?, createdAt }`。
+
+---
+
+## 六、环境变量
 
 在 EdgeOne 控制台配置（不在 `.env` 中）。
 
@@ -907,7 +997,7 @@ curl "https://your-domain.com/img-api/ID/uuid.jpg" -o cat.jpg
 
 ---
 
-## 六、错误码
+## 七、错误码
 
 ### Assets 中转 API（零信息泄露）
 

@@ -330,6 +330,77 @@ async function mutateIndex(service, fn) {
 
 ---
 
+## 通行密钥（WebAuthn）
+
+通行密钥（passkey）用设备内置认证器（指纹/Face ID/PIN）或 USB 安全密钥替代密码登录，凭证（公钥）永不离开设备，钓鱼免疫。
+
+### 信任模型：注册需登录，登录公开
+
+通行密钥只能证明"持有某设备"，不能自举信任。所以：
+
+- **注册端点需 JWT**（`authMiddleware`）：必须先用密码或已有通行密钥登录，再添加新设备。
+- **登录端点公开**：任何人都能请求 `login/begin`，但没有已注册的设备就拿不出有效签名。
+
+### 流程（两阶段 ceremony）
+
+```
+注册（已登录）：
+  POST /passkey/register/begin {name}
+    → 生成 challenge，存 KV `pkch_{nonce}`（TTL 5min）
+    → 返回 PublicKeyCredentialCreationOptions（含 excludeExisting 防重复注册）
+  浏览器 navigator.credentials.create(options)
+  POST /passkey/register/verify {resp, nonce, name}
+    → verifyRegistrationResponse：验签名 + attestation + challenge
+    → 公钥持久化到 KV `passkeys` 聚合 key
+    → 返回成功
+
+登录（公开）：
+  POST /passkey/login/begin
+    → 生成 challenge，存 KV
+    → allowCredentials = 全部已注册凭证
+  浏览器 navigator.credentials.get(options)
+  POST /passkey/login/verify {resp, nonce}
+    → verifyAuthenticationResponse：用对应公钥验签名
+    → 成功：签发与密码登录同款的 JWT（7d）
+    → 失败：recordFailedAttempt（同一套 IP 限速）
+```
+
+### RP ID 与域名绑定
+
+`rp.id` = `BASE_IMG_URL` 的 hostname。WebAuthn 规范要求认证器签名的凭证只能用于同 RP ID 的认证。**后果：换域名 = 所有已注册通行密钥失效**（密码登录不受影响，可作兜底重新注册）。
+
+`expectedOrigin` 允许生产域名 + 本地 dev 端口（`http://localhost:5173`、`http://localhost:4173`），因为 WebAuthn 对 localhost 放行（http 也可用）。
+
+### challenge 防重放
+
+每次 ceremony 生成 32 字节随机 challenge，存 KV 单 key `pkch_{nonce}`，**验证时取出后立即删除（一次性消费）**，过期 5 分钟。KV 无原生 TTL，靠内嵌 `expiresAt` 时间戳 + 读时校验实现过期。
+
+### counter 防克隆
+
+每次认证响应携带 authenticator 计数器。`verifyAuthenticationResponse` 比对存储的 counter，若新值 ≤ 旧值则可能是克隆凭证（拒绝）。单用户场景 counter 更新走 `updateCounter`，用乐观并发写 KV，失败不阻断登录（非安全关键路径）。
+
+### 与 JWT 的衔接
+
+WebAuthn 只替换"证明身份"这一步，会话载体仍是 JWT：
+
+- `login/verify` 成功后用 `getSecret()`（JWT_SECRET 优先）签发 7 天 JWT，与密码登录**完全一致**。
+- 下游所有 `authMiddleware`（`/upload`、`/delete`、`/kv-api/*`、`/passkey/register/*`）零改动即接受通行密钥签发的 JWT。
+- 401 拦截器、localStorage 存储、axios 请求头——全部复用，无需为通行密钥单独建会话。
+
+### 凭证存储：单聚合 key
+
+凭证总数极小（通常 2~10 个），用单 KV key `passkeys = {ver, items: PasskeyCredential[]}` 作为**唯一真相源**，避开最终一致性下的双写竞态（沿用 `akidx_all` 模式）。写入带 `ver` 乐观并发校验，冲突自动重试 reread-merge-rewrite（最多 5 次）。
+
+### 验证库选择
+
+用 `@simplewebauthn/server` 一键搞定 COSE/CBOR/签名验证。Edge runtime 理论可行（WebCrypto 支持 ECDSA P-256 verify）但需手写 COSE→JWK 转换和 CBOR 解码（约 500 行易出错），故验证逻辑全放在 Node Function。
+
+### 多设备支持
+
+每个通行密钥是 `items[]` 中独立一条记录（独立 credential id + 公钥 + counter）。注册时 `excludeCredentials` 列出已有凭证，防止同一 authenticator 重复注册；登录时 `allowCredentials` 列出全部，让用户选择。建议至少注册 2 个设备（主设备 + 备份），避免丢失后无法登录。密码登录始终保留作为最终兜底。
+
+---
+
 ## Assets 哈希去重
 
 ### 机制
@@ -468,7 +539,8 @@ return new Response(body, { headers: { ...NO_STORE } })
 | `node-functions/api/routes/assets-keys.ts` | 密钥管理 API |
 | `node-functions/api/_utils.ts` | CNB 上传/删除/签名工具 |
 | `node-functions/api/_assets_auth.ts` | X-API-Key 校验 |
+| `node-functions/api/_passkey.ts` | WebAuthn 通行密钥注册/登录核心 |
 | `edge-functions/assets-api/[[path]].ts` | KV 索引 + 私有下载 + 密钥库 |
 | `edge-functions/upload-proxy/[[path]].ts` | 大文件流式转发 |
 | `edge-functions/assets-upload/[[path]].ts` | PicGo 大文件 multipart（直接写 KV，不经 HTTP 回环） |
-| `edge-functions/kv-api/[[path]].ts` | 图库索引（前端用） |
+| `edge-functions/kv-api/[[path]].ts` | 图库索引（前端用）+ 通行密钥凭证/challenge 存储 |

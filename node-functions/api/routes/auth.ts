@@ -10,6 +10,17 @@ import {
   recordFailedAttempt,
   clearRateLimit,
 } from '../_auth'
+import {
+  beginRegistration,
+  verifyRegistration,
+  addCredential,
+  beginAuthentication,
+  verifyAuthentication,
+  updateCounter,
+  listCredentials,
+  removeCredential,
+  consumeChallenge,
+} from '../_passkey'
 
 const router = Router()
 
@@ -79,6 +90,105 @@ router.put('/login-path', authMiddleware, async (_req, res) => {
     return res.json(json)
   } catch {
     return res.status(500).json(reply(1, '重置登录路径失败'))
+  }
+})
+
+// ============ 通行密钥（WebAuthn）============
+// 注册需登录（通行密钥证明身份，不能自举信任）；登录公开。
+// 登录成功签发与密码登录同款的 JWT，下游 authMiddleware 零改动即接受。
+
+// 开始注册（需登录）—— 前端拿 options 调 navigator.credentials.create
+router.post('/passkey/register/begin', authMiddleware, async (req, res) => {
+  try {
+    const { name } = (req.body as { name?: string }) || {}
+    const { options, nonce } = await beginRegistration(name)
+    res.json(reply(0, 'ok', { options, nonce }))
+  } catch (e) {
+    res.status(500).json(reply(1, (e as Error).message || '注册初始化失败'))
+  }
+})
+
+// 完成注册（需登录）—— 前端把 navigator.credentials.create 的结果回传验证 + 持久化
+router.post('/passkey/register/verify', authMiddleware, async (req, res) => {
+  try {
+    const { resp, nonce, name } = req.body as {
+      resp: unknown
+      nonce: string
+      name?: string
+    }
+    if (!resp || !nonce) return res.status(400).json(reply(1, '缺少参数'))
+    const challenge = await consumeChallenge(nonce)
+    if (!challenge) return res.status(400).json(reply(1, 'challenge 已过期或无效，请重新注册'))
+    const cred = await verifyRegistration(resp, challenge)
+    cred.name = name
+    await addCredential(cred)
+    res.json(reply(0, '注册成功', { id: cred.id }))
+  } catch (e) {
+    res.status(400).json(reply(1, (e as Error).message || '注册验证失败'))
+  }
+})
+
+// 开始登录（公开）—— 前端拿 options 调 navigator.credentials.get
+router.post('/passkey/login/begin', async (_req, res) => {
+  try {
+    const { options, nonce } = await beginAuthentication()
+    res.json(reply(0, 'ok', { options, nonce }))
+  } catch (e) {
+    res.status(500).json(reply(1, (e as Error).message || '登录初始化失败'))
+  }
+})
+
+// 完成登录（公开）—— 验证签名，成功签发 JWT，失败走限速
+router.post('/passkey/login/verify', async (req, res) => {
+  const ip = getClientIp(req)
+  const remaining = checkRateLimit(ip)
+  if (remaining === 0) {
+    res.set('Retry-After', '900')
+    return res.status(429).json(reply(1, '尝试过于频繁，请 15 分钟后再试'))
+  }
+
+  try {
+    const { resp, nonce } = req.body as { resp?: unknown; nonce?: string }
+    if (!resp || !nonce) return res.status(400).json(reply(1, '缺少参数'))
+    const challenge = await consumeChallenge(nonce)
+    if (!challenge) {
+      recordFailedAttempt(ip)
+      return res.status(400).json(reply(1, 'challenge 已过期或无效'))
+    }
+    const { credentialId, newCounter } = await verifyAuthentication(resp, challenge)
+    await updateCounter(credentialId, newCounter)
+    clearRateLimit(ip)
+    const token = jwt.sign({}, getSecret(), { expiresIn: '7d' })
+    res.json(reply(0, '登录成功', { token }))
+  } catch (e) {
+    recordFailedAttempt(ip)
+    const left = checkRateLimit(ip)
+    res
+      .status(401)
+      .json(reply(1, left > 0 ? `通行密钥验证失败，剩余 ${left} 次尝试` : '已限速'))
+    void e
+  }
+})
+
+// 列出全部通行密钥（需登录）—— 设备管理页用
+router.get('/passkey/list', authMiddleware, async (_req, res) => {
+  try {
+    const items = await listCredentials()
+    res.json(reply(0, 'ok', { items }))
+  } catch (e) {
+    res.status(500).json(reply(1, (e as Error).message || '获取列表失败'))
+  }
+})
+
+// 删除通行密钥（需登录）—— 移除设备
+router.delete('/passkey/:id', authMiddleware, async (req, res) => {
+  try {
+    const id = req.params.id
+    const removed = await removeCredential(id)
+    if (!removed) return res.status(404).json(reply(1, '未找到该通行密钥'))
+    res.json(reply(0, '已删除'))
+  } catch (e) {
+    res.status(500).json(reply(1, (e as Error).message || '删除失败'))
   }
 })
 

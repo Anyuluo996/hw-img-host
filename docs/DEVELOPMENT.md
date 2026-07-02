@@ -67,7 +67,7 @@ PAGES_SOURCE=skills edgeone pages env pull # 拉取环境变量到 .env
 
 | 变量 | 说明 | 示例 |
 | --- | --- | --- |
-| `BASE_IMG_URL` | 站点域名 | `https://your-domain.com/` |
+| `BASE_IMG_URL` | 站点域名（**也用作通行密钥 RP ID,换域名 = 通行密钥失效**） | `https://your-domain.com/` |
 | `SLUG_IMG` | CNB 图床仓库 | `user/repo` |
 | `CNB_TOKEN` | **CNB 统一 token（推荐，全权限即可）** | `xxxx` |
 | `TOKEN_IMG` | CNB token(imgs 读写)；可选,覆盖 CNB_TOKEN | |
@@ -154,9 +154,9 @@ curl -X POST "http://localhost:8088/api/assets/sign?name=big.bin&size=8000000" \
 ```
 hw-img-host/
 ├── src/                     # Vue 3 SPA 前端
-│   ├── views/               # 页面(Home/Gallery/Tags/Keys/Login/Root)
+│   ├── views/               # 页面(Home/Gallery/Tags/Keys/Passkeys/OrphanCleanup/Login/Root)
 │   ├── components/          # 组件(FileUploader + shadcn ui/)
-│   ├── composables/         # useAuth(JWT + axios 拦截器)
+│   ├── composables/         # useAuth(JWT + axios 拦截器 + 通行密钥方法)
 │   ├── router/              # vue-router(含秘密登录路径)
 │   ├── lib/utils.ts         # cn() helper
 │   └── assets/main.css      # Tailwind v4 + shadcn 主题变量
@@ -164,8 +164,9 @@ hw-img-host/
 ├── node-functions/api/      # Node Cloud Functions(Express 5)
 │   ├── [[default]].ts       # 入口:挂载路由(assets 在 json() 之前!)
 │   ├── routes/              # auth/upload/delete/assets/assets-keys
-│   ├── _auth.ts             # JWT 签发/验证
+│   ├── _auth.ts             # JWT 签发/验证 + IP 限速
 │   ├── _assets_auth.ts      # X-API-Key 校验(HTTP 委托边缘函数)
+│   ├── _passkey.ts          # WebAuthn 通行密钥注册/登录核心
 │   ├── _utils.ts            # CNB 上传/删除/签名工具
 │   ├── _validation.ts       # 文件名净化 + MAX_FILE_SIZE
 │   └── _reply.ts            # 统一响应 { code, msg, data }
@@ -316,6 +317,15 @@ EdgeOne KV 是最终一致的(<60s),无 CAS/条件写。并发写入需要乐观
 ### KV 无 TTL / 无 cron
 
 平台没有 KV 自动过期或定时任务。所有过期清理都是**懒删除**(读写时扫描),详见 [MECHANISM.md TTL 懒删除](./MECHANISM.md#ttl-懒删除)。
+
+### 通行密钥（WebAuthn）开发注意
+
+- **本地 dev**：WebAuthn 对 `localhost` 放行（http 也可用）。`expectedOrigin` 已加入 `http://localhost:5173`（dev）和 `http://localhost:4173`（preview）。
+- **生产必须 HTTPS**：EdgeOne Pages 默认 HTTPS，无需额外配置。
+- **RP ID = BASE_IMG_URL 的 hostname**：本地 dev 用 `localhost` 注册的通行密钥在生产域名上**不可用**（反之亦然）——它们是不同的 RP。本地测试和生产是两套独立的通行密钥。
+- **首次注册**：必须先用密码登录，进入「通行密钥」页注册。之后才能用通行密钥登录。
+- **验证库**：`@simplewebauthn/server` 在 Node Function 中运行（标准 ESM + `node:crypto`），esbuild 打包无问题。
+- **换域名 = 失效**：部署后不要随意换 `BASE_IMG_URL`，否则所有已注册通行密钥失效（密码登录不受影响，可重新注册）。
 
 ---
 

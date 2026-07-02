@@ -46,6 +46,13 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      // 通行密钥设备管理（登录后）
+      path: '/passkeys',
+      name: 'passkeys',
+      component: () => import('../views/PasskeysView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       // 动态登录路由：任何未知单段路径都匹配到 LoginView。
       // 守卫里验证是否为真实 login_path（非已登录用户访问时才校验）。
       path: '/:loginPath',

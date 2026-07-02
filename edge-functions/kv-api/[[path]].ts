@@ -364,8 +364,31 @@ export async function onRequest(context: {
 
   try {
     if (method === 'GET') {
-      // 子路由 GET /kv-api/check?hash=xxx — 按文件哈希查重
       const firstSeg = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      // ============ 通行密钥（WebAuthn）============
+      if (firstSeg === 'webauthn') {
+        const secondSeg = Array.isArray(pathSegments) ? pathSegments[1] : undefined
+        const kv = getKV()
+        // GET /kv-api/webauthn → 读凭证聚合 key
+        if (!secondSeg || secondSeg === '') {
+          const raw = await kv.get('passkeys', 'json')
+          const store = (raw || { ver: 0, items: [] }) as { ver: number; items: unknown[] }
+          return jsonRes({ code: 0, msg: 'ok', data: store }, 200, origin)
+        }
+        // GET /kv-api/webauthn/challenge/{nonce} → 读 challenge
+        if (secondSeg === 'challenge') {
+          const nonce = Array.isArray(pathSegments) ? pathSegments[2] : undefined
+          if (!nonce) return jsonRes({ code: 1, msg: '缺少 nonce' }, 400, origin)
+          const raw = await kv.get(`pkch_${nonce}`, 'json')
+          return jsonRes(
+            { code: 0, msg: 'ok', data: raw || null },
+            200,
+            origin,
+          )
+        }
+        return jsonRes({ code: 1, msg: '未知子路由' }, 404, origin)
+      }
+      // 子路由 GET /kv-api/check?hash=xxx — 按文件哈希查重
       if (firstSeg === 'check') {
         const url = new URL(context.request.url)
         const hash = (url.searchParams.get('hash') || '').trim()
@@ -413,6 +436,34 @@ export async function onRequest(context: {
 
     if (method === 'PUT') {
       const id = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      // ============ 通行密钥（WebAuthn）============
+      if (id === 'webauthn') {
+        const kv = getKV()
+        const secondSeg = Array.isArray(pathSegments) ? pathSegments[1] : undefined
+        const body = (await context.request.json()) as Record<string, unknown>
+        // PUT /kv-api/webauthn → 整体替换凭证聚合 key（带 ver 乐观并发）
+        if (!secondSeg || secondSeg === '') {
+          const existing = ((await kv.get('passkeys', 'json')) || { ver: 0, items: [] }) as {
+            ver: number
+            items: unknown[]
+          }
+          const expectVer = Number(body.ver)
+          if (!Number.isNaN(expectVer) && existing.ver !== expectVer) {
+            return jsonRes({ code: 1, msg: '版本冲突，请重试' }, 409, origin)
+          }
+          const nextVer = (existing.ver || 0) + 1
+          await kv.put('passkeys', JSON.stringify({ ver: nextVer, items: body.items || [] }))
+          return jsonRes({ code: 0, msg: 'ok', data: { ver: nextVer } }, 200, origin)
+        }
+        // PUT /kv-api/webauthn/challenge/{nonce} → 写 challenge（内嵌过期时间）
+        if (secondSeg === 'challenge') {
+          const nonce = Array.isArray(pathSegments) ? pathSegments[2] : undefined
+          if (!nonce) return jsonRes({ code: 1, msg: '缺少 nonce' }, 400, origin)
+          await kv.put(`pkch_${nonce}`, JSON.stringify(body))
+          return jsonRes({ code: 0, msg: 'ok', data: true }, 200, origin)
+        }
+        return jsonRes({ code: 1, msg: '未知子路由' }, 404, origin)
+      }
       // 子路由 PUT /kv-api/login-path — 管理员重置登录路径（生成新随机路径，旧的失效）
       if (id === 'login-path') {
         try {
@@ -438,6 +489,19 @@ export async function onRequest(context: {
 
     if (method === 'DELETE') {
       const id = Array.isArray(pathSegments) ? pathSegments[0] : pathSegments
+      // ============ 通行密钥（WebAuthn）============
+      if (id === 'webauthn') {
+        const kv = getKV()
+        const secondSeg = Array.isArray(pathSegments) ? pathSegments[1] : undefined
+        // DELETE /kv-api/webauthn/challenge/{nonce} → 删除 challenge（一次性消费）
+        if (secondSeg === 'challenge') {
+          const nonce = Array.isArray(pathSegments) ? pathSegments[2] : undefined
+          if (!nonce) return jsonRes({ code: 1, msg: '缺少 nonce' }, 400, origin)
+          await kv.delete(`pkch_${nonce}`)
+          return jsonRes({ code: 0, msg: 'ok', data: true }, 200, origin)
+        }
+        return jsonRes({ code: 1, msg: '未知子路由' }, 404, origin)
+      }
       if (!id) {
         return jsonRes({ code: 1, msg: '缺少 id' }, 400, origin)
       }
